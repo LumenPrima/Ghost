@@ -52,6 +52,12 @@ function convertTierInput(input) {
     delete converted.yearly_price;
   }
 
+  // fork(salvare): keep "absent" and null distinct, so tiers-api.edit can clear with null
+  if (Reflect.has(converted, 'one_time_price')) {
+    converted.oneTimePrice = converted.one_time_price;
+    delete converted.one_time_price;
+  }
+
   return converted;
 }
 

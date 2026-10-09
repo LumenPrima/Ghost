@@ -74,6 +74,8 @@ module.exports = function MembersAPI({
   giftService,
   metafieldValues,
   metafieldDefinitions,
+  purchaseLinks, // fork(salvare)
+  purchaseService, // fork(salvare)
 }) {
   const tokenService = new TokenService({
     privateKey,
@@ -109,6 +111,7 @@ module.exports = function MembersAPI({
     StripeCustomer,
     StripeCustomerSubscription,
     offersAPI,
+    purchaseLinks, // fork(salvare)
   });
 
   const eventRepository = new EventRepository({
@@ -217,6 +220,7 @@ module.exports = function MembersAPI({
     urlUtils,
     emailAddressService,
     giftService,
+    purchaseService, // fork(salvare)
   });
 
   const wellKnownController = new WellKnownController({

@@ -613,6 +613,87 @@ describe('RouterController', function () {
         }
       });
     });
+    // fork(salvare): purchase-only tiers (archived check at router-controller.js:519)
+    describe('_getSubscriptionCheckoutData purchase-only tiers', function () {
+      function createController() {
+        return new RouterController({
+          tiersService,
+          paymentsService,
+          offersAPI,
+          stripeAPIService,
+          labsService,
+          settingsCache,
+          settingsHelpers,
+        });
+      }
+
+      it('rejects a tier that has a one-time price with TIER_PURCHASE_ONLY', async function () {
+        tiersService.api.read.resolves({ id: 'course', status: 'active', oneTimePrice: 9900 });
+
+        await assert.rejects(
+          createController()._getSubscriptionCheckoutData({ tierId: 'course', cadence: 'month' }),
+          (error) => {
+            assert(error instanceof errors.NoPermissionError);
+            assert.equal(error.code, 'TIER_PURCHASE_ONLY');
+            assert.equal(error.message, 'This tier is only available as a one-time purchase.');
+            return true;
+          },
+        );
+      });
+
+      it('rejects an offer whose tier has a one-time price', async function () {
+        tiersService.api.read.resolves({ id: 'course', status: 'active', oneTimePrice: 9900 });
+        offersAPI.getOffer.resolves({
+          id: 'offer_123',
+          status: 'active',
+          cadence: 'month',
+          tier: { id: 'course' },
+        });
+
+        await assert.rejects(
+          createController()._getSubscriptionCheckoutData({ offerId: 'offer_123' }),
+          (error) =>
+            error instanceof errors.NoPermissionError && error.code === 'TIER_PURCHASE_ONLY',
+        );
+      });
+
+      it('allows a tier without a one-time price', async function () {
+        tiersService.api.read.resolves({ id: 'library', status: 'active', oneTimePrice: null });
+
+        const result = await createController()._getSubscriptionCheckoutData({
+          tierId: 'library',
+          cadence: 'month',
+        });
+
+        assert.equal(result.tier.id, 'library');
+      });
+
+      it('never creates a subscription checkout for a purchase-only tier', async function () {
+        tiersService.api.read.resolves({ id: 'course', status: 'active', oneTimePrice: 9900 });
+        const controller = new RouterController({
+          tiersService,
+          paymentsService,
+          offersAPI,
+          stripeAPIService,
+          labsService,
+          settingsCache,
+          settingsHelpers,
+          urlUtils,
+          memberAttributionService: { getAttribution: sinon.stub().resolves({}) },
+        });
+
+        await assert.rejects(
+          controller.createCheckoutSession(
+            { body: { type: 'subscription', tierId: 'course', cadence: 'month', metadata: {} } },
+            { writeHead: () => {}, end: () => {} },
+          ),
+          (error) =>
+            error instanceof errors.NoPermissionError && error.code === 'TIER_PURCHASE_ONLY',
+        );
+        sinon.assert.notCalled(getPaymentLinkSpy);
+      });
+    });
+
     describe('_createDonationCheckoutSession', function () {
       it('accepts requests with a personalNote included', async function () {
         const routerController = new RouterController({
@@ -1281,6 +1362,359 @@ describe('RouterController', function () {
         );
 
         sinon.assert.calledOnce(giftService.service.startCheckout);
+      });
+    });
+
+    // fork(salvare): one-time tier purchases
+    describe('purchase checkout', function () {
+      let purchaseService;
+
+      beforeEach(function () {
+        purchaseService = {
+          service: {
+            startCheckout: sinon.stub().resolves({ url: 'https://checkout.stripe.com/purchase' }),
+          },
+        };
+      });
+
+      function createPurchaseController(overrides = {}) {
+        return new RouterController({
+          tiersService,
+          paymentsService,
+          offersAPI,
+          stripeAPIService,
+          labsService,
+          settingsCache,
+          settingsHelpers,
+          memberRepository: { get: sinon.stub().resolves(null) },
+          urlUtils: { getSiteUrl: sinon.stub().returns('https://example.com/') },
+          memberAttributionService: {
+            getAttribution: sinon.stub().resolves({
+              id: 'post_1',
+              url: '/course-landing/',
+              type: 'post',
+              referrerSource: 'newsletter',
+            }),
+          },
+          emailAddressService,
+          giftService,
+          purchaseService,
+          ...overrides,
+        });
+      }
+
+      function mockRes() {
+        return { writeHead: sinon.stub(), end: sinon.stub() };
+      }
+
+      const urlHistory = [{ path: '/course-landing/', time: Date.now() }];
+
+      it('maps an anonymous purchase request to the module interface and returns its url', async function () {
+        const controller = createPurchaseController();
+        const res = mockRes();
+
+        await controller.createCheckoutSession(
+          {
+            body: {
+              type: 'purchase',
+              tierId: 'course',
+              customerEmail: 'new@example.com',
+              successUrl: 'https://example.com/courses/breaking-free/',
+              cancelUrl: 'https://example.com/courses/',
+              metadata: { urlHistory },
+            },
+          },
+          res,
+        );
+
+        sinon.assert.calledOnce(purchaseService.service.startCheckout);
+        const input = purchaseService.service.startCheckout.firstCall.firstArg;
+        assert.deepEqual(input, {
+          tierId: 'course',
+          tierSlug: undefined,
+          successUrl: 'https://example.com/courses/breaking-free/',
+          cancelUrl: 'https://example.com/courses/',
+          metadata: {
+            attribution_id: 'post_1',
+            attribution_url: '/course-landing/',
+            attribution_type: 'post',
+            referrer_source: 'newsletter',
+          },
+          buyer: {
+            memberId: null,
+            email: 'new@example.com',
+            isAuthenticated: false,
+          },
+        });
+        sinon.assert.calledWith(res.writeHead, 200);
+        assert.deepEqual(JSON.parse(res.end.firstCall.firstArg), {
+          url: 'https://checkout.stripe.com/purchase',
+        });
+        sinon.assert.notCalled(getPaymentLinkSpy);
+        sinon.assert.notCalled(giftService.service.startCheckout);
+      });
+
+      it('passes the authenticated member as the buyer', async function () {
+        const member = {
+          id: 'member_123',
+          get: sinon.stub().withArgs('email').returns('member@example.com'),
+        };
+        const controller = createPurchaseController({
+          tokenService: { decodeToken: sinon.stub().resolves({ sub: 'member@example.com' }) },
+          memberRepository: { get: sinon.stub().resolves(member) },
+        });
+
+        await controller.createCheckoutSession(
+          { body: { type: 'purchase', tierId: 'course', identity: 'token', metadata: {} } },
+          mockRes(),
+        );
+
+        sinon.assert.calledWith(
+          purchaseService.service.startCheckout,
+          sinon.match({
+            tierId: 'course',
+            buyer: {
+              memberId: 'member_123',
+              email: 'member@example.com',
+              isAuthenticated: true,
+            },
+          }),
+        );
+      });
+
+      it('rejects a valid identity whose member no longer exists instead of using customerEmail', async function () {
+        const controller = createPurchaseController({
+          tokenService: { decodeToken: sinon.stub().resolves({ sub: 'renamed@example.com' }) },
+          memberRepository: { get: sinon.stub().resolves(null) },
+        });
+
+        await assert.rejects(
+          controller.createCheckoutSession(
+            {
+              body: {
+                type: 'purchase',
+                tierId: 'course',
+                identity: 'token',
+                customerEmail: 'victim@example.com',
+                metadata: {},
+              },
+            },
+            mockRes(),
+          ),
+          (err) => {
+            assert.equal(err.errorType, 'UnauthorizedError');
+            return true;
+          },
+        );
+        sinon.assert.notCalled(purchaseService.service.startCheckout);
+      });
+
+      it('passes an existing member found by customerEmail as unauthenticated', async function () {
+        const member = {
+          id: 'member_456',
+          get: sinon.stub().withArgs('email').returns('existing@example.com'),
+        };
+        const controller = createPurchaseController({
+          memberRepository: { get: sinon.stub().resolves(member) },
+        });
+
+        await controller.createCheckoutSession(
+          {
+            body: {
+              type: 'purchase',
+              tierId: 'course',
+              customerEmail: 'existing@example.com',
+              metadata: {},
+            },
+          },
+          mockRes(),
+        );
+
+        sinon.assert.calledWith(
+          purchaseService.service.startCheckout,
+          sinon.match({
+            buyer: {
+              memberId: 'member_456',
+              email: 'existing@example.com',
+              isAuthenticated: false,
+            },
+          }),
+        );
+      });
+
+      it('forwards tierSlug alongside tierId and leaves the precedence to the module', async function () {
+        const controller = createPurchaseController();
+
+        await controller.createCheckoutSession(
+          { body: { type: 'purchase', tierSlug: 'breaking-free', metadata: {} } },
+          mockRes(),
+        );
+        await controller.createCheckoutSession(
+          {
+            body: { type: 'purchase', tierId: 'course', tierSlug: 'breaking-free', metadata: {} },
+          },
+          mockRes(),
+        );
+
+        sinon.assert.calledTwice(purchaseService.service.startCheckout);
+        const slugOnly = purchaseService.service.startCheckout.firstCall.firstArg;
+        assert.equal(slugOnly.tierId, undefined);
+        assert.equal(slugOnly.tierSlug, 'breaking-free');
+        const both = purchaseService.service.startCheckout.secondCall.firstArg;
+        assert.equal(both.tierId, 'course');
+        assert.equal(both.tierSlug, 'breaking-free');
+      });
+
+      it('drops cross-origin return URLs before delegating', async function () {
+        const controller = createPurchaseController();
+
+        await controller.createCheckoutSession(
+          {
+            body: {
+              type: 'purchase',
+              tierId: 'course',
+              successUrl: 'https://evil.com/success',
+              cancelUrl: 'https://evil.com/cancel',
+              metadata: {},
+            },
+          },
+          mockRes(),
+        );
+
+        const input = purchaseService.service.startCheckout.firstCall.firstArg;
+        assert.equal(input.successUrl, undefined);
+        assert.equal(input.cancelUrl, undefined);
+      });
+
+      it('strips client-supplied purchase markers from the metadata', async function () {
+        const controller = createPurchaseController();
+
+        await controller.createCheckoutSession(
+          {
+            body: {
+              type: 'purchase',
+              tierId: 'course',
+              metadata: {
+                ghost_purchase_tier_id: 'attacker-tier',
+                ghost_purchase_member_uuid: 'attacker-uuid',
+                ghost_donation: true,
+                custom_key: 'preserved',
+              },
+            },
+          },
+          mockRes(),
+        );
+
+        const { metadata } = purchaseService.service.startCheckout.firstCall.firstArg;
+        assert.equal('ghost_purchase_tier_id' in metadata, false);
+        assert.equal('ghost_purchase_member_uuid' in metadata, false);
+        assert.equal('ghost_donation' in metadata, false);
+        assert.equal(metadata.custom_key, 'preserved');
+      });
+
+      it('strips purchase markers from donation checkout metadata', async function () {
+        const controller = createPurchaseController();
+
+        await controller.createCheckoutSession(
+          {
+            body: {
+              type: 'donation',
+              metadata: {
+                ghost_purchase_tier_id: 'course',
+                ghost_purchase_member_uuid: 'someone-else',
+              },
+            },
+          },
+          mockRes(),
+        );
+
+        sinon.assert.calledOnce(getDonationLinkSpy);
+        const { metadata } = getDonationLinkSpy.firstCall.firstArg;
+        assert.equal('ghost_purchase_tier_id' in metadata, false);
+        assert.equal('ghost_purchase_member_uuid' in metadata, false);
+        sinon.assert.notCalled(purchaseService.service.startCheckout);
+      });
+
+      it('throws DisabledFeatureError when paid members are not enabled', async function () {
+        const controller = createPurchaseController({
+          settingsHelpers: {
+            ...settingsHelpers,
+            arePaidMembersEnabled: sinon.stub().returns(false),
+          },
+        });
+
+        await assert.rejects(
+          controller.createCheckoutSession(
+            { body: { type: 'purchase', tierId: 'course', metadata: {} } },
+            mockRes(),
+          ),
+          errors.DisabledFeatureError,
+        );
+        sinon.assert.notCalled(purchaseService.service.startCheckout);
+      });
+
+      it('throws BadRequestError when the purchases module is not wired', async function () {
+        for (const missing of [undefined, {}, { service: undefined }]) {
+          const controller = createPurchaseController({ purchaseService: missing });
+
+          await assert.rejects(
+            controller.createCheckoutSession(
+              { body: { type: 'purchase', tierId: 'course', metadata: {} } },
+              mockRes(),
+            ),
+            (error) =>
+              error instanceof errors.BadRequestError && error.message === 'Invalid checkout type.',
+          );
+        }
+      });
+
+      it('rethrows BadRequestError and NoPermissionError from the module unchanged', async function () {
+        const badRequest = new errors.BadRequestError({ message: 'This tier does not exist.' });
+        const alreadyOwned = new errors.NoPermissionError({
+          message: 'You already own this.',
+          code: 'PURCHASE_ALREADY_OWNED',
+        });
+
+        for (const error of [badRequest, alreadyOwned]) {
+          purchaseService.service.startCheckout.rejects(error);
+          const controller = createPurchaseController();
+
+          await assert.rejects(
+            controller.createCheckoutSession(
+              { body: { type: 'purchase', tierId: 'course', metadata: {} } },
+              mockRes(),
+            ),
+            (thrown) => thrown === error,
+          );
+        }
+      });
+
+      it('wraps any other module error in a BadRequestError', async function () {
+        purchaseService.service.startCheckout.rejects(new Error('Stripe is down'));
+        const controller = createPurchaseController();
+
+        await assert.rejects(
+          controller.createCheckoutSession(
+            { body: { type: 'purchase', tierId: 'course', metadata: {} } },
+            mockRes(),
+          ),
+          (error) =>
+            error instanceof errors.BadRequestError &&
+            error.message === 'Unable to initiate checkout session',
+        );
+      });
+
+      it('still rejects unknown checkout types', async function () {
+        const controller = createPurchaseController();
+
+        await assert.rejects(
+          controller.createCheckoutSession(
+            { body: { type: 'lifetime', tierId: 'course', metadata: {} } },
+            mockRes(),
+          ),
+          errors.BadRequestError,
+        );
+        sinon.assert.notCalled(purchaseService.service.startCheckout);
       });
     });
 

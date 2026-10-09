@@ -129,6 +129,11 @@ module.exports = class TiersAPI {
       yearlyPrice: data.yearlyPrice || tier.yearlyPrice,
     });
 
+    // fork(salvare): absent leaves the one-time price alone, null clears it
+    if (Reflect.has(data, 'oneTimePrice')) {
+      tier.oneTimePrice = data.oneTimePrice;
+    }
+
     await this.#repository.save(tier);
 
     return tier;
@@ -157,6 +162,7 @@ module.exports = class TiersAPI {
       welcomePageURL: data.welcomePageURL,
       monthlyPrice: data.monthlyPrice,
       yearlyPrice: data.yearlyPrice,
+      oneTimePrice: data.oneTimePrice, // fork(salvare)
       currency: data.currency,
       trialDays: data.trialDays,
     });

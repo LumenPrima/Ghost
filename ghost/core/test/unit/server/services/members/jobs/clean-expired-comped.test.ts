@@ -9,7 +9,7 @@ type QueryCall = {
   tableName: string;
   whereInField?: string;
   ids?: string[] | null;
-  where?: [string, string];
+  where?: unknown[];
   data?: any;
   rows?: any[];
 };
@@ -27,6 +27,7 @@ function createTrx({
   const insertCalls: QueryCall[] = [];
   const deleteCalls: QueryCall[] = [];
   const forUpdateCalls: QueryCall[] = [];
+  const selectCalls: QueryCall[] = [];
   // Operation order across the whole transaction - the tests pin the full
   // write sequence, most importantly that the member rows are locked before
   // they are updated
@@ -36,9 +37,11 @@ function createTrx({
     const query = {
       ids: null as string[] | null,
       whereInField: undefined as string | undefined,
-      andWhereArgs: undefined as [string, string] | undefined,
+      andWhereArgs: undefined as unknown[] | undefined,
+      whereArgs: undefined as unknown[] | undefined,
 
-      where() {
+      where(...args: unknown[]) {
+        query.whereArgs = args;
         return query;
       },
 
@@ -48,8 +51,8 @@ function createTrx({
         return query;
       },
 
-      andWhere(field: string, value: string) {
-        query.andWhereArgs = [field, value];
+      andWhere(...args: unknown[]) {
+        query.andWhereArgs = args;
         return query;
       },
 
@@ -65,11 +68,12 @@ function createTrx({
       },
 
       select() {
+        selectCalls.push({ tableName, where: query.whereArgs });
         return Promise.resolve(expiredRows);
       },
 
       del() {
-        deleteCalls.push({ tableName, ids: query.ids });
+        deleteCalls.push({ tableName, ids: query.ids, where: query.andWhereArgs });
         ops.push(`del:${tableName}`);
         onDelete?.();
         return Promise.resolve(query.ids!.length);
@@ -91,7 +95,7 @@ function createTrx({
     return query;
   };
 
-  return { trx, updateCalls, insertCalls, deleteCalls, forUpdateCalls, ops };
+  return { trx, updateCalls, insertCalls, deleteCalls, forUpdateCalls, selectCalls, ops };
 }
 
 describe('clean-expired-comped task', function () {
@@ -134,15 +138,27 @@ describe('clean-expired-comped task', function () {
   }
 
   it('deletes expired rows, updates comped members and records status events in one unit', async function () {
-    const { trx, updateCalls, insertCalls, deleteCalls, forUpdateCalls, ops } = createTrx({
-      expiredRows: [{ id: 'expired-product-relation-id', member_id: 'member-id' }],
-      compedMembers: [{ id: 'member-id', status: 'comped', updated_at: previousUpdatedAt }],
-    });
+    const { trx, updateCalls, insertCalls, deleteCalls, forUpdateCalls, selectCalls, ops } =
+      createTrx({
+        expiredRows: [{ id: 'expired-product-relation-id', member_id: 'member-id' }],
+        compedMembers: [{ id: 'member-id', status: 'comped', updated_at: previousUpdatedAt }],
+      });
 
     const result = await cleanExpiredComped(createDeps(trx));
 
+    // fork(salvare): the delete re-checks the expiry with the select's cutoff, so a row whose
+    // expiry a purchase reset to null after the select is not removed by its stale id
+    assert.equal(selectCalls.length, 1);
+    const [field, operator, cutoff] = selectCalls[0]!.where!;
+    assert.equal(field, 'expiry_at');
+    assert.equal(operator, '<');
+    assert.match(String(cutoff), /^\d{4}-\d{2}-\d{2} 00:00:00$/);
     assert.deepEqual(deleteCalls, [
-      { tableName: 'members_products', ids: ['expired-product-relation-id'] },
+      {
+        tableName: 'members_products',
+        ids: ['expired-product-relation-id'],
+        where: ['expiry_at', '<', cutoff],
+      },
     ]);
 
     // Only the affected members, filtered to those still comped, are read -

@@ -72,6 +72,7 @@ describe('Exporter', function () {
       'members_payment_events',
       'members_product_events',
       'members_products',
+      'members_purchases', // fork(salvare)
       'members_status_events',
       'members_stripe_customers',
       'members_stripe_customers_subscriptions',
@@ -154,6 +155,7 @@ describe('Exporter', function () {
       'outbox',
       'gift_deliveries',
       'gifts',
+      'members_purchases', // fork(salvare)
       'gift_links',
       'post_gift_links',
     ];

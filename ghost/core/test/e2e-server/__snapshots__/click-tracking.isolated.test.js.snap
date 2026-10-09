@@ -53,6 +53,7 @@ Object {
           "monthly_price": 500,
           "monthly_price_id": StringMatching /\\[a-f0-9\\]\\{24\\}/,
           "name": "Default Product",
+          "one_time_price": null,
           "slug": "default-product",
           "trial_days": 0,
           "type": "paid",

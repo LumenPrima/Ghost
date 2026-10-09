@@ -27,10 +27,42 @@ function isDonationCheckoutSession(session) {
   return isStripeMetadataTrue(session.metadata?.ghost_donation);
 }
 
+// fork(salvare): one-time tier purchases are marked by a server-set metadata key
+function isPurchaseCheckoutSession(session) {
+  return hasStripeMetadataKey(session.metadata, 'ghost_purchase_tier_id');
+}
+
 // Matches the donation marker on key presence, not truthiness, so an ill-formed
 // donation marker alongside a true gift marker still counts as a conflict.
 function hasConflictingCheckoutFlowMetadata(session) {
-  return hasStripeMetadataKey(session.metadata, 'ghost_donation') && isGiftCheckoutSession(session);
+  // fork(salvare): more than one flow marker is a conflict (purchase added)
+  const flows = [
+    hasStripeMetadataKey(session.metadata, 'ghost_donation'),
+    isGiftCheckoutSession(session),
+    isPurchaseCheckoutSession(session),
+  ];
+  return flows.filter(Boolean).length > 1;
+}
+
+// fork(salvare): true when any charge on the PaymentIntent is fully refunded. The embedded
+// `charges` list exists at the pinned STRIPE_API_VERSION (2020-08-27) and was removed in
+// 2022-11-15; a missing list must fail the webhook (Stripe retries) rather than read as "not
+// refunded" and grant access to a refunded payment.
+function isPaymentIntentRefunded(paymentIntent) {
+  const charges = paymentIntent?.charges?.data;
+  if (Array.isArray(charges)) {
+    return charges.some((charge) => charge?.refunded === true);
+  }
+
+  const latestCharge = paymentIntent?.latest_charge;
+  if (latestCharge && typeof latestCharge === 'object' && 'refunded' in latestCharge) {
+    return latestCharge.refunded === true;
+  }
+
+  throw new errors.InternalServerError({
+    message: 'PaymentIntent has no charges list; refund state unknown',
+    context: `PaymentIntent ${paymentIntent?.id ?? '(unknown)'}`,
+  });
 }
 
 function getStripeResourceId(resource) {
@@ -87,6 +119,7 @@ module.exports = class CheckoutSessionEventService {
    * @param {object} deps.staffServiceEmails
    * @param {function} deps.sendSignupEmail
    * @param {function} deps.isPaidWelcomeEmailActive
+   * @param {object} [deps.purchaseService] fork(salvare): the purchases module's service (lazy getter)
    */
   constructor(deps) {
     this.api = deps.api;
@@ -105,10 +138,23 @@ module.exports = class CheckoutSessionEventService {
     }
 
     if (eventType === 'checkout.session.async_payment_succeeded') {
-      if (session.mode === 'payment' && isGiftCheckoutSession(session)) {
+      // fork(salvare): purchases may also complete asynchronously
+      if (
+        session.mode === 'payment' &&
+        (isGiftCheckoutSession(session) || isPurchaseCheckoutSession(session))
+      ) {
         await this.handlePaymentEvent(session);
       }
       return;
+    }
+
+    // fork(salvare): purchases are only fulfilled from payment-mode sessions. The marker is
+    // server-set, so seeing it on any other mode is unexpected; the purchase is ignored and the
+    // session is handled as its mode dictates.
+    if (session.mode !== 'payment' && isPurchaseCheckoutSession(session)) {
+      logging.warn(
+        `Ignoring purchase metadata on checkout session ${session.id} with mode ${session.mode}`,
+      );
     }
 
     if (session.mode === 'setup') {
@@ -142,6 +188,15 @@ module.exports = class CheckoutSessionEventService {
         return;
       }
       await this.handleGiftEvent(session);
+      return;
+    }
+
+    // fork(salvare): one-time tier purchase; async payment methods wait for async_payment_succeeded
+    if (isPurchaseCheckoutSession(session)) {
+      if (session.payment_status !== 'paid') {
+        return;
+      }
+      await this.handlePurchaseEvent(session);
       return;
     }
 
@@ -182,6 +237,93 @@ module.exports = class CheckoutSessionEventService {
       stripeCheckoutSessionId: session.id,
       stripePaymentIntentId: getStripeResourceId(session.payment_intent),
     });
+  }
+
+  /**
+   * fork(salvare): Handles a paid checkout session for a one-time tier purchase
+   *
+   * Parses the session into the purchases module's Stripe-free input. The PaymentIntent is
+   * fetched so a refund that landed before fulfilment is not lost. Any throw answers non-2xx,
+   * so Stripe retries.
+   *
+   * @param {import('stripe').Stripe.Checkout.Session} session
+   */
+  async handlePurchaseEvent(session) {
+    if (!('purchaseService' in this.deps)) {
+      // Only constructions that predate purchases (old unit tests) lack the dependency
+      logging.error(`Purchase checkout session ${session.id} received without a purchase service`);
+      return;
+    }
+
+    const purchaseService = this.deps.purchaseService;
+    if (!purchaseService) {
+      throw new errors.InternalServerError({
+        message: 'Purchase service is not initialised',
+        context: `Unable to fulfil purchase checkout session ${session.id}`,
+      });
+    }
+
+    const metadata = session.metadata || {};
+    const stripeCustomerId = getStripeResourceId(session.customer);
+    const stripePaymentIntentId = getStripeResourceId(session.payment_intent);
+
+    let alreadyRefunded = false;
+    if (stripePaymentIntentId) {
+      alreadyRefunded = isPaymentIntentRefunded(
+        await this.api.getPaymentIntent(stripePaymentIntentId),
+      );
+    }
+
+    const result = await purchaseService.fulfil({
+      stripeCheckoutSessionId: session.id,
+      stripePaymentIntentId,
+      stripeCustomerId,
+      tierId: metadata.ghost_purchase_tier_id,
+      memberUuid: metadata.ghost_purchase_member_uuid ?? null,
+      email: await this.getGiftBuyerEmail(session, stripeCustomerId),
+      name: session.customer_details?.name ?? null,
+      amount: session.amount_total,
+      currency: session.currency,
+      alreadyRefunded,
+      attribution: {
+        id: metadata.attribution_id ?? null,
+        url: metadata.attribution_url ?? null,
+        type: metadata.attribution_type ?? null,
+        referrerSource: metadata.referrer_source ?? null,
+        referrerMedium: metadata.referrer_medium ?? null,
+        referrerUrl: metadata.referrer_url ?? null,
+        utmSource: metadata.utm_source ?? null,
+        utmMedium: metadata.utm_medium ?? null,
+        utmCampaign: metadata.utm_campaign ?? null,
+        utmTerm: metadata.utm_term ?? null,
+        utmContent: metadata.utm_content ?? null,
+      },
+    });
+
+    // A refund made while fulfilment was in flight finds no committed row, so its
+    // charge.refunded webhook is acknowledged and lost. Stripe stores the refund before
+    // emitting that event, so re-reading the PaymentIntent after commit closes the window.
+    // Errors propagate so Stripe retries this event; refund() and the duplicate path are
+    // idempotent and reconcile on redelivery.
+    if (result?.outcome === 'fulfilled' && stripePaymentIntentId) {
+      const refundedDuringFulfilment = isPaymentIntentRefunded(
+        await this.api.getPaymentIntent(stripePaymentIntentId),
+      );
+      if (refundedDuringFulfilment) {
+        logging.warn(
+          {
+            event: { name: 'purchase.refunded_during_fulfilment' },
+            stripeCheckoutSessionId: session.id,
+            stripePaymentIntentId,
+          },
+          'Purchase was fully refunded while it was being fulfilled; revoking access',
+        );
+        await purchaseService.refund({
+          paymentIntentId: stripePaymentIntentId,
+          fullyRefunded: true,
+        });
+      }
+    }
   }
 
   /**

@@ -41,6 +41,7 @@ const messages = {
   invalidCode: 'Invalid verification code.',
   failedToVerifyCode: 'Failed to verify code, please try again.',
   signInRequired: 'You must be signed in to continue.',
+  purchaseOnlyTier: 'This tier is only available as a one-time purchase.', // fork(salvare)
 };
 
 // helper utility for logic shared between sendMagicLink and verifyOTC
@@ -79,6 +80,9 @@ const RESERVED_CHECKOUT_METADATA_KEYS = new Set([
   'tier_id',
   'cadence',
   'duration',
+  // fork(salvare): server-only purchase markers; a client must never set them (e.g. via donation metadata)
+  'ghost_purchase_tier_id',
+  'ghost_purchase_member_uuid',
 ]);
 
 function removeReservedCheckoutMetadata(metadata) {
@@ -153,6 +157,8 @@ module.exports = class RouterController {
    * @param {any} deps.settingsHelpers
    * @param {any} deps.urlUtils
    * @param {any} deps.emailAddressService
+   * @param {any} [deps.giftService]
+   * @param {{service?: {startCheckout(input: object): Promise<{url: string}>}}} [deps.purchaseService] fork(salvare)
    */
   constructor({
     offersAPI,
@@ -173,6 +179,7 @@ module.exports = class RouterController {
     urlUtils,
     emailAddressService,
     giftService,
+    purchaseService, // fork(salvare)
   }) {
     this._offersAPI = offersAPI;
     this._paymentsService = paymentsService;
@@ -192,6 +199,7 @@ module.exports = class RouterController {
     this._urlUtils = urlUtils;
     this._emailAddressService = emailAddressService;
     this._giftService = giftService;
+    this._purchaseService = purchaseService; // fork(salvare)
   }
 
   async ensureStripe(_req, res, next) {
@@ -522,6 +530,14 @@ module.exports = class RouterController {
       });
     }
 
+    // fork(salvare): tiers with a one-time price can only be bought outright (covers offers and gift continuation too)
+    if (tier.oneTimePrice) {
+      throw new NoPermissionError({
+        message: tpl(messages.purchaseOnlyTier),
+        code: 'TIER_PURCHASE_ONLY',
+      });
+    }
+
     return {
       tier,
       offer,
@@ -737,13 +753,84 @@ module.exports = class RouterController {
         cancelUrl: options.cancelUrl,
         buyer: {
           memberId: options.member?.id ?? null,
-          email: options.member?.get('email') ?? options.email ?? null,
+          email: options.isAuthenticated
+            ? options.member.get('email')
+            : (options.member?.get('email') ?? options.email ?? null),
           name: options.member?.get('name') ?? null,
           isAuthenticated: options.isAuthenticated,
         },
       });
     } catch (err) {
       if (err instanceof BadRequestError || err instanceof NoPermissionError) {
+        throw err;
+      }
+
+      logging.error(err);
+      this._sentry?.captureException?.(err);
+      throw new BadRequestError({
+        err,
+        message: tpl(messages.unableToCheckout),
+      });
+    }
+  }
+
+  /**
+   * fork(salvare): one-time purchase of a tier, delegated to the purchases module
+   *
+   * @param {object} options
+   * @param {string} [options.tierId] wins over tierSlug when present
+   * @param {string} [options.tierSlug]
+   * @param {string} [options.successUrl]
+   * @param {string} [options.cancelUrl]
+   * @param {string} [options.email]
+   * @param {object} [options.member]
+   * @param {boolean} options.isAuthenticated
+   * @param {object} options.metadata
+   * @returns {Promise<{url: string}>}
+   */
+  async _createPurchaseCheckoutSession(options) {
+    if (!this._settingsHelpers.arePaidMembersEnabled()) {
+      throw new DisabledFeatureError({
+        message: tpl(messages.notConfigured),
+      });
+    }
+
+    const service = this._purchaseService?.service;
+    if (!service) {
+      throw new BadRequestError({
+        message: tpl(messages.invalidType),
+      });
+    }
+
+    // A valid identity token whose member no longer exists must never fall back to the
+    // client-supplied customerEmail: the purchase flow would mint a sign-in link for it.
+    if (options.isAuthenticated && !options.member) {
+      throw new UnauthorizedError({
+        message: tpl(messages.signInRequired),
+      });
+    }
+
+    try {
+      return await service.startCheckout({
+        tierId: options.tierId,
+        tierSlug: options.tierSlug,
+        successUrl: options.successUrl,
+        cancelUrl: options.cancelUrl,
+        metadata: options.metadata,
+        buyer: {
+          memberId: options.member?.id ?? null,
+          email: options.isAuthenticated
+            ? options.member.get('email')
+            : (options.member?.get('email') ?? options.email ?? null),
+          isAuthenticated: options.isAuthenticated,
+        },
+      });
+    } catch (err) {
+      if (
+        err instanceof BadRequestError ||
+        err instanceof NoPermissionError ||
+        err instanceof UnauthorizedError
+      ) {
         throw err;
       }
 
@@ -763,7 +850,11 @@ module.exports = class RouterController {
     const membersEnabled = true;
 
     // Check this checkout type is supported
-    if (typeof type !== 'string' || !['subscription', 'donation', 'gift'].includes(type)) {
+    // fork(salvare): 'purchase' added
+    if (
+      typeof type !== 'string' ||
+      !['subscription', 'donation', 'gift', 'purchase'].includes(type)
+    ) {
       throw new BadRequestError({
         message: tpl(messages.invalidType),
       });
@@ -900,6 +991,13 @@ module.exports = class RouterController {
         deliveryDate: req.body.deliveryDate,
         successUrl: siteUrl,
         cancelUrl: options.cancelUrl || siteUrl,
+      });
+    } else if (type === 'purchase') {
+      // fork(salvare): one-time tier purchase
+      response = await this._createPurchaseCheckoutSession({
+        ...options,
+        tierId: req.body.tierId,
+        tierSlug: req.body.tierSlug,
       });
     }
 

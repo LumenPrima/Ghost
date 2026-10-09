@@ -78,10 +78,16 @@ function serializeTier(tier, options, requirements = null) {
     serialized.requirements = requirements.get(json.id) ?? {};
   }
 
+  // fork(salvare): omitted when null, so tiers that are not sold once keep their shape
+  if (json.oneTimePrice !== null && json.oneTimePrice !== undefined) {
+    serialized.one_time_price = json.oneTimePrice;
+  }
+
   if (serialized.type === 'free') {
     delete serialized.currency;
     delete serialized.monthly_price;
     delete serialized.yearly_price;
+    delete serialized.one_time_price; // fork(salvare)
   }
 
   return serialized;
@@ -122,6 +128,7 @@ function createSerializer(debugString, serialize) {
  * @prop {string} currency
  * @prop {number} monthly_price
  * @prop {number} yearly_price
+ * @prop {number} [one_time_price] fork(salvare): only present when set
  */
 
 /**

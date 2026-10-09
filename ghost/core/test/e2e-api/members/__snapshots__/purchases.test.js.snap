@@ -1,0 +1,7 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`One-time tier purchases 1. sells the course to a new visitor and creates a free member 1: [body] 1`] = `
+Object {
+  "url": "https://checkout.stripe.com/c/pay/fake-data",
+}
+`;

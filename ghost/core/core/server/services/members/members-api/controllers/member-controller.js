@@ -3,6 +3,7 @@ const tpl = require('@tryghost/tpl');
 
 const messages = {
   blockedEmailDomain: 'Memberships from this email domain are currently restricted.',
+  purchaseOnlyTier: 'Tier is only available as a one-time purchase.', // fork(salvare)
 };
 
 module.exports = class MemberController {
@@ -157,6 +158,12 @@ module.exports = class MemberController {
           return res.end('Tier is archived.');
         }
 
+        // fork(salvare): a tier with a one-time price cannot be reached by changing a subscription
+        if (tier.oneTimePrice) {
+          res.writeHead(403);
+          return res.end(tpl(messages.purchaseOnlyTier));
+        }
+
         const stripePrice = await this._paymentsService.getPriceForTierCadence(tier, cadence);
 
         await this._memberRepository.updateSubscription({
@@ -182,6 +189,12 @@ module.exports = class MemberController {
         if (product.get('active') !== true) {
           res.writeHead(403);
           return res.end('Tier is archived.');
+        }
+
+        // fork(salvare): a tier with a one-time price cannot be reached by changing a subscription
+        if (product.get('one_time_price')) {
+          res.writeHead(403);
+          return res.end(tpl(messages.purchaseOnlyTier));
         }
 
         await this._memberRepository.updateSubscription({

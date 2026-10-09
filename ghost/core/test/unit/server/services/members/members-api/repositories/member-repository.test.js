@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const sinon = require('sinon');
 const errors = require('@tryghost/errors');
+const logging = require('@tryghost/logging');
 const DomainEvents = require('@tryghost/domain-events');
 const labs = require('../../../../../../../core/shared/labs');
 const MemberRepository = require('../../../../../../../core/server/services/members/members-api/repositories/member-repository');
@@ -2877,6 +2878,1183 @@ describe('MemberRepository', function () {
       await repo.destroy({ id: 'nonexistent' }, {});
 
       sinon.assert.notCalled(Member.destroy);
+    });
+  });
+
+  // fork(salvare): one-time purchases
+  describe('purchase-sourced products', function () {
+    const trx = { executionPromise: Promise.resolve() };
+    let purchaseLinks;
+
+    const purchased = (...entries) => {
+      purchaseLinks.getPurchaseSourcedProducts.resolves(entries);
+    };
+
+    beforeEach(function () {
+      purchaseLinks = { getPurchaseSourcedProducts: sinon.stub().resolves([]) };
+      MemberProductEvent = { add: sinon.stub().resolves() };
+      MemberStatusEvent = { add: sinon.stub().resolves() };
+    });
+
+    describe('_getPurchaseSourcedProducts', function () {
+      it('returns [] when purchase links are not wired', async function () {
+        const repo = buildRepo();
+        assert.deepEqual(await repo._getPurchaseSourcedProducts('member_1', {}), []);
+      });
+
+      it('returns [] without a member id and does not query', async function () {
+        const repo = buildRepo({ purchaseLinks });
+        assert.deepEqual(await repo._getPurchaseSourcedProducts(undefined, {}), []);
+        sinon.assert.notCalled(purchaseLinks.getPurchaseSourcedProducts);
+      });
+
+      it('delegates to purchase links with only the transaction', async function () {
+        purchased({ id: 'course', expiry_at: null });
+        const repo = buildRepo({ purchaseLinks });
+
+        const result = await repo._getPurchaseSourcedProducts('member_1', {
+          transacting: trx,
+          forUpdate: true,
+          id: 'member_1',
+        });
+
+        assert.deepEqual(result, [{ id: 'course', expiry_at: null }]);
+        sinon.assert.calledOnceWithExactly(purchaseLinks.getPurchaseSourcedProducts, 'member_1', {
+          transacting: trx,
+        });
+      });
+
+      it('tolerates undefined options', async function () {
+        const repo = buildRepo({ purchaseLinks });
+        await repo._getPurchaseSourcedProducts('member_1', undefined);
+        sinon.assert.calledOnceWithExactly(
+          purchaseLinks.getPurchaseSourcedProducts,
+          'member_1',
+          {},
+        );
+      });
+    });
+
+    describe('transaction pass-through', function () {
+      it('upsertCustomer passes options to the StripeCustomer upsert', async function () {
+        const repo = buildRepo();
+        const data = { customer_id: 'cus_1', member_id: 'member_1', name: 'A', email: 'a@b.c' };
+
+        await repo.upsertCustomer(data, { transacting: trx });
+
+        sinon.assert.calledOnceWithExactly(StripeCustomer.upsert, data, { transacting: trx });
+      });
+
+      it('upsertCustomer keeps working without options', async function () {
+        const repo = buildRepo();
+        const data = { customer_id: 'cus_1', member_id: 'member_1', name: 'A', email: 'a@b.c' };
+
+        await repo.upsertCustomer(data);
+
+        sinon.assert.calledOnce(StripeCustomer.upsert);
+        assert.deepEqual(StripeCustomer.upsert.firstCall.args[0], data);
+        assert.equal(StripeCustomer.upsert.firstCall.args[1], undefined);
+      });
+
+      it('get passes the transaction to Member.findOne', async function () {
+        Member.findOne = sinon.stub().resolves(null);
+        const repo = buildRepo();
+
+        await repo.get({ uuid: 'uuid_1' }, { transacting: trx });
+
+        sinon.assert.calledOnceWithExactly(
+          Member.findOne,
+          { uuid: 'uuid_1' },
+          { transacting: trx },
+        );
+      });
+
+      it('create uses the caller transaction for the member and its events', async function () {
+        const repo = buildRepo({ MemberStatusEvent });
+
+        await repo.create({ email: 'buyer@example.com', name: 'Buyer' }, { transacting: trx });
+
+        sinon.assert.notCalled(Member.transaction);
+        assert.equal(Member.add.firstCall.args[1].transacting, trx);
+        assert.equal(MemberStatusEvent.add.firstCall.args[1].transacting, trx);
+        assert.equal(newslettersService.getAll.firstCall.args[0].transacting, trx);
+      });
+    });
+
+    describe('linkSubscription', function () {
+      let memberProducts;
+      let otherSubscriptions;
+      let ghostProduct;
+      let previousProduct;
+
+      const productModel = (id) => ({
+        id,
+        get: sinon.stub().callsFake((key) => ({ id, name: id })[key]),
+        toJSON: sinon.stub().returns({ id, expiry_at: null }),
+      });
+
+      const subscription = (status) => ({
+        id: 'sub_123',
+        customer: 'cus_123',
+        status,
+        items: {
+          type: 'list',
+          data: [
+            {
+              id: 'item_123',
+              price: {
+                id: 'price_library',
+                product: 'prod_library',
+                active: true,
+                nickname: 'Monthly',
+                currency: 'usd',
+                recurring: { interval: 'month' },
+                unit_amount: 500,
+                type: 'recurring',
+              },
+            },
+          ],
+        },
+        start_date: Date.now() / 1000,
+        current_period_end: Date.now() / 1000 + 60 * 60 * 24 * 31,
+        cancel_at_period_end: false,
+      });
+
+      const link = async (status, { existingSubscription = null } = {}) => {
+        const subscriptionData = subscription(status);
+        stripeAPIService = {
+          configured: true,
+          getSubscription: sinon.stub().resolves(subscriptionData),
+          getCustomer: sinon.stub().resolves({
+            id: 'cus_123',
+            invoice_settings: { default_payment_method: null },
+            subscriptions: { data: [] },
+          }),
+        };
+        const repo = buildRepo({ purchaseLinks });
+        sinon.stub(repo, 'getSubscriptionByStripeID').resolves(existingSubscription);
+
+        await repo.linkSubscription(
+          { id: 'member_1', subscription: subscriptionData },
+          { transacting: trx, context: {} },
+        );
+        return repo;
+      };
+
+      beforeEach(function () {
+        sinon.stub(MemberRepository.prototype, '_updateCurrentSubscription').resolves();
+        memberProducts = [];
+        otherSubscriptions = [];
+        ghostProduct = productModel('library');
+        previousProduct = null;
+
+        Member = {
+          findOne: sinon.stub().resolves({
+            id: 'member_1',
+            get: sinon.stub().returns(undefined),
+            related: (relation) => ({
+              query: sinon.stub().returns({ fetchOne: sinon.stub().resolves({}) }),
+              toJSON: sinon.stub().callsFake(() => (relation === 'products' ? memberProducts : {})),
+              fetch: sinon.stub().callsFake(async () => ({
+                toJSON: () => (relation === 'products' ? memberProducts : {}),
+                models: relation === 'stripeSubscriptions' ? otherSubscriptions : [],
+              })),
+            }),
+            toJSON: sinon.stub().returns({}),
+          }),
+          edit: sinon.stub().resolves({
+            attributes: {},
+            _previousAttributes: {},
+            load: sinon.stub().resolvesThis(),
+            related: sinon.stub().returns({ models: [] }),
+          }),
+        };
+        StripeCustomerSubscription = {
+          add: sinon.stub().resolves({ id: 'mscs_1', get: sinon.stub().returns() }),
+          edit: sinon.stub().callsFake(async (data) => ({
+            id: 'mscs_1',
+            get: (key) => data[key],
+          })),
+        };
+        MemberPaidSubscriptionEvent = { add: sinon.stub().resolves() };
+        productRepository = {
+          get: sinon.stub().callsFake(async (filter) => {
+            if (filter.stripe_product_id) {
+              return ghostProduct;
+            }
+            if (filter.stripe_price_id === 'price_old') {
+              return previousProduct;
+            }
+            return null;
+          }),
+          update: sinon.stub().resolves({}),
+          getDefaultProduct: sinon.stub().resolves(null),
+        };
+      });
+
+      it('regression: a purchaser whose subscription is cancelled ends free and keeps the purchase', async function () {
+        purchased({ id: 'course', expiry_at: null });
+        memberProducts = [
+          { id: 'course', expiry_at: null },
+          { id: 'library', expiry_at: null },
+        ];
+
+        await link('canceled');
+
+        sinon.assert.calledOnce(Member.edit);
+        assert.deepEqual(Member.edit.firstCall.args[0], {
+          status: 'free',
+          products: [{ id: 'course', expiry_at: null }],
+        });
+        assert.equal(Member.edit.firstCall.args[1].id, 'member_1');
+        sinon.assert.calledWith(purchaseLinks.getPurchaseSourcedProducts, 'member_1', {
+          transacting: trx,
+        });
+        // only the subscription product is reported as removed
+        sinon.assert.calledOnce(MemberProductEvent.add);
+        assert.deepEqual(MemberProductEvent.add.firstCall.args[0], {
+          member_id: 'member_1',
+          product_id: 'library',
+          action: 'removed',
+        });
+      });
+
+      it('keeps paid when another active subscription is on a purchased tier', async function () {
+        purchased({ id: 'course', expiry_at: null });
+        memberProducts = [
+          { id: 'course', expiry_at: null },
+          { id: 'library', expiry_at: null },
+        ];
+        otherSubscriptions = [
+          {
+            get: sinon
+              .stub()
+              .callsFake((key) => ({ status: 'active', stripe_price_id: 'price_course' })[key]),
+          },
+        ];
+        const getProduct = productRepository.get;
+        productRepository.get = sinon.stub().callsFake(async (filter) => {
+          if (filter.stripe_price_id === 'price_course') {
+            return productModel('course');
+          }
+          return getProduct(filter);
+        });
+
+        await link('canceled');
+
+        assert.deepEqual(Member.edit.firstCall.args[0], {
+          status: 'paid',
+          products: [{ id: 'course', expiry_at: null }],
+        });
+      });
+
+      it('control: without purchase links the purchaser is left comped (upstream bug)', async function () {
+        purchaseLinks = undefined;
+        memberProducts = [
+          { id: 'course', expiry_at: null },
+          { id: 'library', expiry_at: null },
+        ];
+
+        await link('canceled');
+
+        assert.deepEqual(Member.edit.firstCall.args[0], {
+          status: 'comped',
+          products: [{ id: 'course', expiry_at: null }],
+        });
+      });
+
+      it('keeps a comp and its expiry_at next to the purchase, and stays comped', async function () {
+        purchased({ id: 'course', expiry_at: null });
+        memberProducts = [
+          { id: 'course', expiry_at: null },
+          { id: 'comp', expiry_at: '2026-12-01T00:00:00.000Z' },
+          { id: 'library', expiry_at: null },
+        ];
+
+        await link('canceled');
+
+        assert.deepEqual(Member.edit.firstCall.args[0], {
+          status: 'comped',
+          products: [
+            { id: 'course', expiry_at: null },
+            { id: 'comp', expiry_at: '2026-12-01T00:00:00.000Z' },
+          ],
+        });
+      });
+
+      it('keeps the expiry_at of an expiring purchase and ends free', async function () {
+        const expiry = new Date('2027-06-01T00:00:00.000Z');
+        purchased({ id: 'course', expiry_at: expiry });
+        memberProducts = [
+          { id: 'course', expiry_at: expiry },
+          { id: 'library', expiry_at: null },
+        ];
+
+        await link('canceled');
+
+        assert.deepEqual(Member.edit.firstCall.args[0], {
+          status: 'free',
+          products: [{ id: 'course', expiry_at: expiry }],
+        });
+      });
+
+      it('keeps a purchased product when it was the previous product of a changed subscription', async function () {
+        purchased({ id: 'course', expiry_at: null });
+        memberProducts = [{ id: 'course', expiry_at: null }];
+        previousProduct = productModel('course');
+        const existingSubscription = {
+          id: 'mscs_1',
+          get: sinon.stub().callsFake(
+            (key) =>
+              ({
+                stripe_price_id: 'price_old',
+                plan_id: 'price_old',
+                status: 'active',
+                cancel_at_period_end: false,
+                mrr: 500,
+                offer_id: null,
+              })[key],
+          ),
+        };
+
+        await link('active', { existingSubscription });
+
+        assert.deepEqual(Member.edit.firstCall.args[0], {
+          status: 'paid',
+          products: [
+            { id: 'course', expiry_at: null },
+            { id: 'library', expiry_at: null },
+          ],
+        });
+      });
+
+      it('control: without purchase links the previous product is dropped on a price change (upstream)', async function () {
+        purchaseLinks = undefined;
+        memberProducts = [{ id: 'course', expiry_at: null }];
+        previousProduct = productModel('course');
+        const existingSubscription = {
+          id: 'mscs_1',
+          get: sinon.stub().callsFake(
+            (key) =>
+              ({
+                stripe_price_id: 'price_old',
+                plan_id: 'price_old',
+                status: 'active',
+                cancel_at_period_end: false,
+                mrr: 500,
+                offer_id: null,
+              })[key],
+          ),
+        };
+
+        await link('active', { existingSubscription });
+
+        assert.deepEqual(Member.edit.firstCall.args[0], {
+          status: 'paid',
+          products: [{ id: 'library', expiry_at: null }],
+        });
+      });
+    });
+
+    describe('update', function () {
+      let memberEdit;
+      let existingProducts;
+      let existingSubscriptions;
+
+      beforeEach(function () {
+        memberEdit = sinon.stub().callsFake((data) => ({
+          id: 'member_1',
+          updated_at: new Date(),
+          attributes: { email: 'test@example.com', status: data.status },
+          _previousAttributes: { email: 'test@example.com', status: data.status },
+          _changed: {},
+          get: sinon
+            .stub()
+            .callsFake((key) => ({ email: 'test@example.com', status: data.status })[key]),
+          related: sinon.stub().returns({ fetch: sinon.stub().resolves(), models: [] }),
+        }));
+        existingProducts = [];
+        existingSubscriptions = [];
+
+        const initialMember = {
+          get: sinon.stub().withArgs('email').returns('test@example.com'),
+          related: sinon.stub().callsFake((relation) => {
+            if (relation === 'products') {
+              return { models: existingProducts };
+            }
+            if (relation === 'stripeSubscriptions') {
+              return { models: existingSubscriptions };
+            }
+            return { models: [] };
+          }),
+          load: sinon.stub().resolves(),
+        };
+
+        Member = { edit: memberEdit, findOne: sinon.stub().resolves(initialMember) };
+        productRepository = {
+          get: sinon.stub().callsFake(async ({ id }) => ({
+            id,
+            get: sinon.stub().withArgs('active').returns(true),
+          })),
+        };
+        stripeAPIService = { configured: true };
+        purchased({ id: 'course', expiry_at: null });
+      });
+
+      it('comps a purchaser without tripping moreThanOneProduct, keeping the purchase', async function () {
+        existingProducts = [{ id: 'course' }];
+
+        await buildRepo({ purchaseLinks }).update(
+          { products: [{ id: 'course' }, { id: 'comp' }] },
+          { id: 'member_1' },
+        );
+
+        sinon.assert.calledOnce(memberEdit);
+        const payload = memberEdit.firstCall.args[0];
+        assert.equal(payload.status, 'comped');
+        assert.deepEqual(payload.products, [{ id: 'comp' }, { id: 'course', expiry_at: null }]);
+        sinon.assert.calledOnce(MemberProductEvent.add);
+        assert.deepEqual(MemberProductEvent.add.firstCall.args[0], {
+          member_id: 'member_1',
+          product_id: 'comp',
+          action: 'added',
+        });
+        sinon.assert.calledWith(purchaseLinks.getPurchaseSourcedProducts, 'member_1', {});
+      });
+
+      it('control: without purchase links the same comp is rejected (upstream)', async function () {
+        existingProducts = [{ id: 'course' }];
+
+        await assert.rejects(
+          buildRepo().update({ products: [{ id: 'course' }, { id: 'comp' }] }, { id: 'member_1' }),
+          { message: 'A member cannot have more than one Product' },
+        );
+      });
+
+      it('comps a purchaser who omits the purchased tier from the request', async function () {
+        existingProducts = [{ id: 'course' }];
+
+        await buildRepo({ purchaseLinks }).update(
+          { products: [{ id: 'comp' }] },
+          { id: 'member_1' },
+        );
+
+        const payload = memberEdit.firstCall.args[0];
+        assert.equal(payload.status, 'comped');
+        assert.deepEqual(payload.products, [{ id: 'comp' }, { id: 'course', expiry_at: null }]);
+        sinon.assert.calledOnce(MemberProductEvent.add);
+        assert.equal(MemberProductEvent.add.firstCall.args[0].product_id, 'comp');
+      });
+
+      it('removing the comp makes the purchaser free and keeps the purchase', async function () {
+        existingProducts = [{ id: 'course' }, { id: 'comp' }];
+
+        await buildRepo({ purchaseLinks }).update(
+          { products: [{ id: 'course' }] },
+          { id: 'member_1' },
+        );
+
+        const payload = memberEdit.firstCall.args[0];
+        assert.equal(payload.status, 'free');
+        assert.deepEqual(payload.products, [{ id: 'course', expiry_at: null }]);
+        sinon.assert.calledOnce(MemberProductEvent.add);
+        assert.deepEqual(MemberProductEvent.add.firstCall.args[0], {
+          member_id: 'member_1',
+          product_id: 'comp',
+          action: 'removed',
+        });
+      });
+
+      it('re-attaches the purchase when a gift refund sends products: [] with status free', async function () {
+        existingProducts = [{ id: 'course' }, { id: 'gift_tier' }];
+
+        await buildRepo({ purchaseLinks }).update(
+          { products: [], status: 'free' },
+          { id: 'member_1' },
+        );
+
+        const payload = memberEdit.firstCall.args[0];
+        assert.equal(payload.status, 'free');
+        assert.deepEqual(payload.products, [{ id: 'course', expiry_at: null }]);
+        sinon.assert.calledOnce(MemberProductEvent.add);
+        assert.equal(MemberProductEvent.add.firstCall.args[0].product_id, 'gift_tier');
+      });
+
+      it('re-attaches the purchase when products: [] is sent and the purchase is the only link', async function () {
+        existingProducts = [{ id: 'course' }];
+
+        await buildRepo({ purchaseLinks }).update({ products: [] }, { id: 'member_1' });
+
+        const payload = memberEdit.firstCall.args[0];
+        assert.equal(payload.status, undefined);
+        assert.deepEqual(payload.products, [{ id: 'course', expiry_at: null }]);
+        sinon.assert.notCalled(MemberProductEvent.add);
+      });
+
+      it('moves a gift member to free when the gift tier is also purchased', async function () {
+        existingProducts = [{ id: 'course' }];
+        const initialMember = await Member.findOne();
+        initialMember.get = sinon
+          .stub()
+          .callsFake((key) => ({ email: 'test@example.com', status: 'gift' })[key]);
+
+        await buildRepo({ purchaseLinks }).update(
+          { products: [], status: 'free' },
+          { id: 'member_1' },
+        );
+
+        const payload = memberEdit.firstCall.args[0];
+        assert.equal(payload.status, 'free');
+        assert.deepEqual(payload.products, [{ id: 'course', expiry_at: null }]);
+        sinon.assert.notCalled(MemberProductEvent.add);
+      });
+
+      it('leaves a gift member alone when no status is requested', async function () {
+        existingProducts = [{ id: 'course' }];
+        const initialMember = await Member.findOne();
+        initialMember.get = sinon
+          .stub()
+          .callsFake((key) => ({ email: 'test@example.com', status: 'gift' })[key]);
+
+        await buildRepo({ purchaseLinks }).update({ products: [] }, { id: 'member_1' });
+
+        assert.equal(memberEdit.firstCall.args[0].status, undefined);
+      });
+
+      it('re-attaches the purchase when Stripe is not configured', async function () {
+        stripeAPIService = { configured: false };
+        existingProducts = [{ id: 'course' }];
+
+        await buildRepo({ purchaseLinks }).update({ products: [] }, { id: 'member_1' });
+
+        const payload = memberEdit.firstCall.args[0];
+        assert.equal(payload.status, undefined);
+        assert.deepEqual(payload.products, [{ id: 'course', expiry_at: null }]);
+        sinon.assert.notCalled(MemberProductEvent.add);
+      });
+
+      it('forces the purchase expiry when the purchased tier is comped with an expiry', async function () {
+        existingProducts = [{ id: 'course' }];
+
+        await buildRepo({ purchaseLinks }).update(
+          { products: [{ id: 'course', expiry_at: '2027-01-01T00:00:00.000Z' }] },
+          { id: 'member_1' },
+        );
+
+        const payload = memberEdit.firstCall.args[0];
+        assert.equal(payload.status, undefined);
+        assert.deepEqual(payload.products, [{ id: 'course', expiry_at: null }]);
+        sinon.assert.notCalled(MemberProductEvent.add);
+      });
+
+      it('does not read purchases when products are not being updated', async function () {
+        await buildRepo({ purchaseLinks }).update({ name: 'New name' }, { id: 'member_1' });
+
+        sinon.assert.notCalled(purchaseLinks.getPurchaseSourcedProducts);
+        assert.equal(memberEdit.firstCall.args[0].products, undefined);
+      });
+
+      it('passes the transaction to the purchase read', async function () {
+        existingProducts = [{ id: 'course' }];
+
+        await buildRepo({ purchaseLinks }).update(
+          { products: [{ id: 'course' }] },
+          { id: 'member_1', transacting: trx },
+        );
+
+        sinon.assert.calledWith(purchaseLinks.getPurchaseSourcedProducts, 'member_1', {
+          transacting: trx,
+        });
+      });
+    });
+
+    describe('removeComplimentarySubscription', function () {
+      let member;
+      let products;
+
+      beforeEach(function () {
+        products = [];
+        member = {
+          id: 'member_1',
+          load: sinon.stub().resolves(),
+          related: sinon.stub().callsFake((relation) => ({
+            fetch: sinon.stub().resolves({ models: [] }),
+            models: [],
+            toJSON: () => (relation === 'products' ? products : []),
+          })),
+        };
+        Member = {
+          transaction: sinon.stub().callsFake((callback) => callback(trx)),
+          findOne: sinon.stub().resolves(member),
+          edit: sinon.stub().resolves(),
+        };
+        stripeAPIService = { configured: true };
+      });
+
+      it('locks the member and edits in one transaction so a concurrent grant cannot be detached', async function () {
+        purchased({ id: 'course', expiry_at: null });
+        products = [
+          { id: 'course', expiry_at: null },
+          { id: 'comp', expiry_at: '2026-12-01T00:00:00.000Z' },
+        ];
+
+        await buildRepo({ purchaseLinks }).removeComplimentarySubscription({ id: 'member_1' });
+
+        sinon.assert.calledOnce(Member.transaction);
+        sinon.assert.calledWith(
+          Member.findOne,
+          { id: 'member_1' },
+          { transacting: trx, forUpdate: true },
+        );
+        const lockCall = Member.findOne.getCalls().find((call) => call.args[1]?.forUpdate === true);
+        assert.ok(lockCall.calledBefore(member.load.firstCall));
+        assert.equal(member.load.firstCall.args[1].transacting, trx);
+        sinon.assert.calledWith(purchaseLinks.getPurchaseSourcedProducts, 'member_1', {
+          transacting: trx,
+        });
+        assert.deepEqual(Member.edit.firstCall.args[1], { id: 'member_1', transacting: trx });
+      });
+
+      it('uses the caller transaction when one is passed', async function () {
+        const callerTrx = { executionPromise: Promise.resolve(), caller: true };
+        products = [{ id: 'comp', expiry_at: null }];
+
+        await buildRepo({ purchaseLinks }).removeComplimentarySubscription(
+          { id: 'member_1' },
+          { transacting: callerTrx },
+        );
+
+        sinon.assert.notCalled(Member.transaction);
+        sinon.assert.calledWith(
+          Member.findOne,
+          { id: 'member_1' },
+          { transacting: callerTrx, forUpdate: true },
+        );
+        assert.deepEqual(Member.edit.firstCall.args[1], {
+          id: 'member_1',
+          transacting: callerTrx,
+        });
+      });
+
+      it('keeps the purchase-sourced link and drops the unbacked comp', async function () {
+        purchased({ id: 'course', expiry_at: null });
+        products = [
+          { id: 'course', expiry_at: null },
+          { id: 'comp', expiry_at: '2026-12-01T00:00:00.000Z' },
+        ];
+
+        await buildRepo({ purchaseLinks }).removeComplimentarySubscription({ id: 'member_1' }, {});
+
+        sinon.assert.calledOnce(Member.edit);
+        assert.deepEqual(Member.edit.firstCall.args[0], {
+          products: [{ id: 'course', expiry_at: null }],
+        });
+        // purchases are read after the products are loaded
+        sinon.assert.callOrder(member.load, purchaseLinks.getPurchaseSourcedProducts);
+      });
+
+      it('does not edit when only the purchase-sourced link remains', async function () {
+        purchased({ id: 'course', expiry_at: null });
+        products = [{ id: 'course', expiry_at: null }];
+
+        await buildRepo({ purchaseLinks }).removeComplimentarySubscription({ id: 'member_1' }, {});
+
+        sinon.assert.notCalled(Member.edit);
+      });
+    });
+
+    describe('grantPurchasedProduct', function () {
+      let member;
+      let products;
+      let subscriptions;
+      let status;
+
+      beforeEach(function () {
+        products = [];
+        subscriptions = [];
+        status = 'free';
+        member = {
+          id: 'member_1',
+          get: sinon.stub().callsFake((key) => ({ status })[key]),
+          related: sinon.stub().callsFake((relation) => {
+            if (relation === 'products') {
+              return { toJSON: () => products };
+            }
+            if (relation === 'stripeSubscriptions') {
+              return { models: subscriptions };
+            }
+            return { models: [] };
+          }),
+        };
+        Member = {
+          transaction: sinon.stub().callsFake((callback) => callback(trx)),
+          findOne: sinon.stub().resolves(member),
+          edit: sinon.stub().resolves({ id: 'member_1' }),
+        };
+      });
+
+      it('adds a new link, keeping the other links and their expiry_at, without a status change', async function () {
+        products = [{ id: 'comp', name: 'Comp', expiry_at: '2026-12-01T00:00:00.000Z' }];
+        status = 'comped';
+
+        const result = await buildRepo({ purchaseLinks }).grantPurchasedProduct(
+          { memberId: 'member_1', productId: 'course', expiresAt: null },
+          { transacting: trx },
+        );
+
+        assert.deepEqual(result, { id: 'member_1' });
+        sinon.assert.calledOnce(Member.findOne);
+        const findOptions = Member.findOne.firstCall.args[1];
+        assert.equal(findOptions.transacting, trx);
+        assert.equal(findOptions.forUpdate, true);
+        assert.equal(findOptions.require, false);
+
+        sinon.assert.calledOnce(Member.edit);
+        assert.deepEqual(Member.edit.firstCall.args[0], {
+          products: [
+            { id: 'comp', name: 'Comp', expiry_at: '2026-12-01T00:00:00.000Z' },
+            { id: 'course', expiry_at: null },
+          ],
+        });
+        assert.equal(Member.edit.firstCall.args[1].id, 'member_1');
+        assert.equal(Member.edit.firstCall.args[1].transacting, trx);
+
+        sinon.assert.calledOnceWithExactly(
+          MemberProductEvent.add,
+          { member_id: 'member_1', product_id: 'course', action: 'added' },
+          { transacting: trx },
+        );
+        sinon.assert.notCalled(MemberStatusEvent.add);
+      });
+
+      it('opens its own transaction when none is passed', async function () {
+        await buildRepo({ purchaseLinks }).grantPurchasedProduct({
+          memberId: 'member_1',
+          productId: 'course',
+        });
+
+        sinon.assert.calledOnce(Member.transaction);
+        assert.equal(Member.findOne.firstCall.args[1].transacting, trx);
+        assert.deepEqual(Member.edit.firstCall.args[0], {
+          products: [{ id: 'course', expiry_at: null }],
+        });
+      });
+
+      it('is a no-op when the product is already linked with the same expiry', async function () {
+        products = [{ id: 'course', expiry_at: null }];
+
+        const result = await buildRepo({ purchaseLinks }).grantPurchasedProduct(
+          { memberId: 'member_1', productId: 'course', expiresAt: null },
+          { transacting: trx },
+        );
+
+        assert.equal(result, member);
+        sinon.assert.notCalled(Member.edit);
+        sinon.assert.notCalled(MemberProductEvent.add);
+        sinon.assert.notCalled(MemberStatusEvent.add);
+      });
+
+      it('resets an inherited comp expiry to the purchase expiry without an event', async function () {
+        status = 'paid';
+        subscriptions = [{ get: sinon.stub().withArgs('status').returns('active') }];
+        products = [
+          { id: 'library', expiry_at: null },
+          { id: 'course', expiry_at: '2026-12-01T00:00:00.000Z' },
+        ];
+
+        await buildRepo({ purchaseLinks }).grantPurchasedProduct(
+          { memberId: 'member_1', productId: 'course', expiresAt: null },
+          { transacting: trx },
+        );
+
+        assert.deepEqual(Member.edit.firstCall.args[0], {
+          products: [
+            { id: 'library', expiry_at: null },
+            { id: 'course', expiry_at: null },
+          ],
+        });
+        sinon.assert.notCalled(MemberProductEvent.add);
+        sinon.assert.notCalled(MemberStatusEvent.add);
+      });
+
+      it('A5: a member comped only on the purchased tier becomes free', async function () {
+        status = 'comped';
+        products = [{ id: 'course', expiry_at: '2026-12-01T00:00:00.000Z' }];
+
+        await buildRepo({ purchaseLinks }).grantPurchasedProduct(
+          { memberId: 'member_1', productId: 'course', expiresAt: null },
+          { transacting: trx },
+        );
+
+        assert.deepEqual(Member.edit.firstCall.args[0], {
+          products: [{ id: 'course', expiry_at: null }],
+          status: 'free',
+        });
+        sinon.assert.notCalled(MemberProductEvent.add);
+        sinon.assert.calledOnceWithExactly(
+          MemberStatusEvent.add,
+          { member_id: 'member_1', from_status: 'comped', to_status: 'free' },
+          { transacting: trx },
+        );
+      });
+
+      it('A5: also applies when the comp on the purchased tier had no expiry', async function () {
+        status = 'comped';
+        products = [{ id: 'course', expiry_at: null }];
+
+        await buildRepo({ purchaseLinks }).grantPurchasedProduct(
+          { memberId: 'member_1', productId: 'course', expiresAt: null },
+          { transacting: trx },
+        );
+
+        assert.deepEqual(Member.edit.firstCall.args[0], {
+          products: [{ id: 'course', expiry_at: null }],
+          status: 'free',
+        });
+        sinon.assert.calledOnce(MemberStatusEvent.add);
+      });
+
+      it('A5: other purchase-sourced links do not keep the member comped', async function () {
+        status = 'comped';
+        purchased({ id: 'other_course', expiry_at: null });
+        products = [
+          { id: 'other_course', expiry_at: null },
+          { id: 'course', expiry_at: '2026-12-01T00:00:00.000Z' },
+        ];
+
+        await buildRepo({ purchaseLinks }).grantPurchasedProduct(
+          { memberId: 'member_1', productId: 'course', expiresAt: null },
+          { transacting: trx },
+        );
+
+        assert.equal(Member.edit.firstCall.args[0].status, 'free');
+        sinon.assert.calledWith(purchaseLinks.getPurchaseSourcedProducts, 'member_1', {
+          transacting: trx,
+        });
+      });
+
+      it('A5: stays comped while another comp link remains', async function () {
+        status = 'comped';
+        products = [
+          { id: 'comp', expiry_at: null },
+          { id: 'course', expiry_at: '2026-12-01T00:00:00.000Z' },
+        ];
+
+        await buildRepo({ purchaseLinks }).grantPurchasedProduct(
+          { memberId: 'member_1', productId: 'course', expiresAt: null },
+          { transacting: trx },
+        );
+
+        assert.deepEqual(Member.edit.firstCall.args[0], {
+          products: [
+            { id: 'comp', expiry_at: null },
+            { id: 'course', expiry_at: null },
+          ],
+        });
+        sinon.assert.notCalled(MemberStatusEvent.add);
+      });
+
+      it('A5: stays comped when an active (complimentary) subscription exists', async function () {
+        status = 'comped';
+        subscriptions = [{ get: sinon.stub().withArgs('status').returns('active') }];
+        products = [{ id: 'course', expiry_at: '2026-12-01T00:00:00.000Z' }];
+
+        await buildRepo({ purchaseLinks }).grantPurchasedProduct(
+          { memberId: 'member_1', productId: 'course', expiresAt: null },
+          { transacting: trx },
+        );
+
+        assert.equal(Member.edit.firstCall.args[0].status, undefined);
+        sinon.assert.notCalled(MemberStatusEvent.add);
+      });
+
+      it('A5: leaves gift status alone', async function () {
+        status = 'gift';
+        products = [{ id: 'course', expiry_at: '2026-12-01T00:00:00.000Z' }];
+
+        await buildRepo({ purchaseLinks }).grantPurchasedProduct(
+          { memberId: 'member_1', productId: 'course', expiresAt: null },
+          { transacting: trx },
+        );
+
+        assert.equal(Member.edit.firstCall.args[0].status, undefined);
+        sinon.assert.notCalled(MemberStatusEvent.add);
+      });
+
+      it('A5: a new link never changes a comped member status', async function () {
+        status = 'comped';
+        products = [{ id: 'comp', expiry_at: null }];
+
+        await buildRepo({ purchaseLinks }).grantPurchasedProduct(
+          { memberId: 'member_1', productId: 'course', expiresAt: null },
+          { transacting: trx },
+        );
+
+        assert.equal(Member.edit.firstCall.args[0].status, undefined);
+        sinon.assert.notCalled(purchaseLinks.getPurchaseSourcedProducts);
+      });
+
+      it('throws NotFoundError when the member does not exist', async function () {
+        Member.findOne.resolves(null);
+
+        await assert.rejects(
+          buildRepo({ purchaseLinks }).grantPurchasedProduct(
+            { memberId: 'missing', productId: 'course' },
+            { transacting: trx },
+          ),
+          errors.NotFoundError,
+        );
+        sinon.assert.notCalled(Member.edit);
+      });
+    });
+
+    describe('revokePurchasedProduct', function () {
+      let member;
+      let products;
+      let subscriptions;
+      let status;
+
+      const subscriptionFor = (productId, subStatus = 'active') => ({
+        get: sinon.stub().withArgs('status').returns(subStatus),
+        related: () => ({
+          related: () => ({ get: sinon.stub().withArgs('product_id').returns(productId) }),
+        }),
+      });
+
+      beforeEach(function () {
+        products = [];
+        subscriptions = [];
+        status = 'free';
+        member = {
+          id: 'member_1',
+          get: sinon.stub().callsFake((key) => ({ status })[key]),
+          related: sinon.stub().callsFake((relation) => {
+            if (relation === 'products') {
+              return { toJSON: () => products };
+            }
+            if (relation === 'stripeSubscriptions') {
+              return { models: subscriptions };
+            }
+            return { models: [] };
+          }),
+        };
+        Member = {
+          transaction: sinon.stub().callsFake((callback) => callback(trx)),
+          findOne: sinon.stub().resolves(member),
+          edit: sinon.stub().resolves({ id: 'member_1' }),
+        };
+      });
+
+      it('removes the link and writes a removed event', async function () {
+        products = [
+          { id: 'course', expiry_at: null },
+          { id: 'other', expiry_at: '2026-12-01T00:00:00.000Z' },
+        ];
+
+        const result = await buildRepo({ purchaseLinks }).revokePurchasedProduct(
+          { memberId: 'member_1', productId: 'course' },
+          { transacting: trx },
+        );
+
+        assert.deepEqual(result, { id: 'member_1' });
+        const findOptions = Member.findOne.firstCall.args[1];
+        assert.equal(findOptions.transacting, trx);
+        assert.equal(findOptions.forUpdate, true);
+        assert.deepEqual(Member.edit.firstCall.args[0], {
+          products: [{ id: 'other', expiry_at: '2026-12-01T00:00:00.000Z' }],
+        });
+        assert.equal(Member.edit.firstCall.args[1].id, 'member_1');
+        assert.equal(Member.edit.firstCall.args[1].transacting, trx);
+        sinon.assert.calledOnceWithExactly(
+          MemberProductEvent.add,
+          { member_id: 'member_1', product_id: 'course', action: 'removed' },
+          { transacting: trx },
+        );
+        sinon.assert.notCalled(MemberStatusEvent.add);
+      });
+
+      it('opens its own transaction when none is passed', async function () {
+        products = [{ id: 'course', expiry_at: null }];
+
+        await buildRepo({ purchaseLinks }).revokePurchasedProduct({
+          memberId: 'member_1',
+          productId: 'course',
+        });
+
+        sinon.assert.calledOnce(Member.transaction);
+        assert.equal(Member.findOne.firstCall.args[1].transacting, trx);
+      });
+
+      it('keeps the link while another paid purchase grants it', async function () {
+        purchased({ id: 'course', expiry_at: null });
+        products = [{ id: 'course', expiry_at: null }];
+
+        await buildRepo({ purchaseLinks }).revokePurchasedProduct(
+          { memberId: 'member_1', productId: 'course' },
+          { transacting: trx },
+        );
+
+        sinon.assert.notCalled(Member.edit);
+        sinon.assert.notCalled(MemberProductEvent.add);
+      });
+
+      it('keeps the link while an active subscription grants it', async function () {
+        status = 'paid';
+        subscriptions = [subscriptionFor('course')];
+        products = [{ id: 'course', expiry_at: null }];
+
+        await buildRepo({ purchaseLinks }).revokePurchasedProduct(
+          { memberId: 'member_1', productId: 'course' },
+          { transacting: trx },
+        );
+
+        sinon.assert.notCalled(Member.edit);
+      });
+
+      it('removes the link when only a cancelled subscription was for the product', async function () {
+        subscriptions = [subscriptionFor('course', 'canceled')];
+        products = [{ id: 'course', expiry_at: null }];
+
+        await buildRepo({ purchaseLinks }).revokePurchasedProduct(
+          { memberId: 'member_1', productId: 'course' },
+          { transacting: trx },
+        );
+
+        assert.deepEqual(Member.edit.firstCall.args[0], { products: [] });
+      });
+
+      it('makes a comped member with nothing left free, with a status event', async function () {
+        status = 'comped';
+        products = [{ id: 'course', expiry_at: null }];
+
+        await buildRepo({ purchaseLinks }).revokePurchasedProduct(
+          { memberId: 'member_1', productId: 'course' },
+          { transacting: trx },
+        );
+
+        assert.deepEqual(Member.edit.firstCall.args[0], { products: [], status: 'free' });
+        sinon.assert.calledOnceWithExactly(
+          MemberStatusEvent.add,
+          { member_id: 'member_1', from_status: 'comped', to_status: 'free' },
+          { transacting: trx },
+        );
+      });
+
+      it('makes a comped member free when only other purchases remain', async function () {
+        status = 'comped';
+        purchased({ id: 'other_course', expiry_at: null });
+        products = [
+          { id: 'course', expiry_at: null },
+          { id: 'other_course', expiry_at: null },
+        ];
+
+        await buildRepo({ purchaseLinks }).revokePurchasedProduct(
+          { memberId: 'member_1', productId: 'course' },
+          { transacting: trx },
+        );
+
+        assert.deepEqual(Member.edit.firstCall.args[0], {
+          products: [{ id: 'other_course', expiry_at: null }],
+          status: 'free',
+        });
+      });
+
+      it('keeps a comped member comped while another comp remains', async function () {
+        status = 'comped';
+        products = [
+          { id: 'course', expiry_at: null },
+          { id: 'comp', expiry_at: null },
+        ];
+
+        await buildRepo({ purchaseLinks }).revokePurchasedProduct(
+          { memberId: 'member_1', productId: 'course' },
+          { transacting: trx },
+        );
+
+        assert.deepEqual(Member.edit.firstCall.args[0], {
+          products: [{ id: 'comp', expiry_at: null }],
+        });
+        sinon.assert.notCalled(MemberStatusEvent.add);
+      });
+
+      it('leaves gift status alone', async function () {
+        status = 'gift';
+        products = [
+          { id: 'course', expiry_at: null },
+          { id: 'gift_tier', expiry_at: '2027-01-01T00:00:00.000Z' },
+        ];
+
+        await buildRepo({ purchaseLinks }).revokePurchasedProduct(
+          { memberId: 'member_1', productId: 'course' },
+          { transacting: trx },
+        );
+
+        assert.deepEqual(Member.edit.firstCall.args[0], {
+          products: [{ id: 'gift_tier', expiry_at: '2027-01-01T00:00:00.000Z' }],
+        });
+        sinon.assert.notCalled(MemberStatusEvent.add);
+      });
+
+      it('keeps the link when the refunded tier is also the gift member gift tier', async function () {
+        const warnStub = sinon.stub(logging, 'warn');
+        status = 'gift';
+        products = [{ id: 'course', expiry_at: null }];
+
+        const result = await buildRepo({ purchaseLinks }).revokePurchasedProduct(
+          { memberId: 'member_1', productId: 'course' },
+          { transacting: trx },
+        );
+
+        assert.equal(result, member);
+        sinon.assert.notCalled(Member.edit);
+        sinon.assert.notCalled(MemberProductEvent.add);
+        sinon.assert.notCalled(MemberStatusEvent.add);
+        sinon.assert.calledWith(
+          warnStub,
+          sinon.match({ event: { name: 'purchase.refund_kept_gift_link' } }),
+        );
+      });
+
+      it('keeps the gift link when only other purchase links remain', async function () {
+        status = 'gift';
+        purchased({ id: 'other_course', expiry_at: null });
+        products = [
+          { id: 'course', expiry_at: null },
+          { id: 'other_course', expiry_at: null },
+        ];
+
+        await buildRepo({ purchaseLinks }).revokePurchasedProduct(
+          { memberId: 'member_1', productId: 'course' },
+          { transacting: trx },
+        );
+
+        sinon.assert.notCalled(Member.edit);
+      });
+
+      it('does nothing when the product is not linked', async function () {
+        products = [{ id: 'other', expiry_at: null }];
+
+        const result = await buildRepo({ purchaseLinks }).revokePurchasedProduct(
+          { memberId: 'member_1', productId: 'course' },
+          { transacting: trx },
+        );
+
+        assert.equal(result, member);
+        sinon.assert.notCalled(Member.edit);
+        sinon.assert.notCalled(MemberProductEvent.add);
+      });
+
+      it('returns null when the member does not exist', async function () {
+        Member.findOne.resolves(null);
+
+        const result = await buildRepo({ purchaseLinks }).revokePurchasedProduct(
+          { memberId: 'missing', productId: 'course' },
+          { transacting: trx },
+        );
+
+        assert.equal(result, null);
+        sinon.assert.notCalled(Member.edit);
+      });
     });
   });
 });

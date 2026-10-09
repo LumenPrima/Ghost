@@ -229,6 +229,113 @@ describe('MemberController', function () {
       memberRepository.updateSubscription.verify();
     });
 
+    // fork(salvare): purchase-only tiers cannot be reached by changing a subscription's plan
+    describe('purchase-only tiers', function () {
+      const tokenService = {
+        decodeToken: sinon.fake.resolves({ sub: 'fake@email.com' }),
+      };
+
+      const req = (body) => ({
+        body: { identity: 'token', ...body },
+        params: { id: 'subscription_id' },
+      });
+
+      const res = () => ({
+        writeHead: sinon.fake(),
+        end: sinon.fake(),
+      });
+
+      const priceBranchDeps = (productAttributes) => ({
+        StripePrice: {
+          findOne: sinon.fake.resolves({
+            get: (key) => (key === 'stripe_price_id' ? 'stripe_price_id' : undefined),
+          }),
+        },
+        productRepository: {
+          get: sinon.fake.resolves({
+            get: (key) => productAttributes[key],
+          }),
+        },
+      });
+
+      it('rejects a tierId/cadence change to a tier with a one-time price', async function () {
+        const memberRepository = {
+          updateSubscription: sinon.mock('updateSubscription').never(),
+        };
+        const paymentsService = {
+          getPriceForTierCadence: sinon.fake.resolves({ id: 'stripe_price_id' }),
+        };
+        const controller = new MemberController({
+          memberRepository,
+          tiersService: {
+            api: {
+              read: sinon.fake.resolves({ id: 'course', status: 'active', oneTimePrice: 9900 }),
+            },
+          },
+          paymentsService,
+          tokenService,
+        });
+        const response = res();
+
+        await controller.updateSubscription(req({ tierId: 'course', cadence: 'month' }), response);
+
+        memberRepository.updateSubscription.verify();
+        sinon.assert.notCalled(paymentsService.getPriceForTierCadence);
+        sinon.assert.calledOnceWithExactly(response.writeHead, 403);
+        sinon.assert.calledOnceWithExactly(
+          response.end,
+          'Tier is only available as a one-time purchase.',
+        );
+      });
+
+      it('rejects a priceId change to a price whose tier has a one-time price', async function () {
+        const memberRepository = {
+          updateSubscription: sinon.mock('updateSubscription').never(),
+        };
+        const controller = new MemberController({
+          memberRepository,
+          ...priceBranchDeps({ active: true, one_time_price: 9900 }),
+          tokenService,
+        });
+        const response = res();
+
+        await controller.updateSubscription(req({ priceId: 'course_monthly' }), response);
+
+        memberRepository.updateSubscription.verify();
+        sinon.assert.calledOnceWithExactly(response.writeHead, 403);
+        sinon.assert.calledOnceWithExactly(
+          response.end,
+          'Tier is only available as a one-time purchase.',
+        );
+      });
+
+      it('still allows a priceId change to a tier without a one-time price', async function () {
+        const memberRepository = {
+          updateSubscription: sinon
+            .mock('updateSubscription')
+            .once()
+            .withArgs({
+              email: 'fake@email.com',
+              subscription: {
+                subscription_id: 'subscription_id',
+                price: 'stripe_price_id',
+              },
+            }),
+        };
+        const controller = new MemberController({
+          memberRepository,
+          ...priceBranchDeps({ active: true, one_time_price: null }),
+          tokenService,
+        });
+        const response = res();
+
+        await controller.updateSubscription(req({ priceId: 'library_monthly' }), response);
+
+        memberRepository.updateSubscription.verify();
+        sinon.assert.calledOnceWithExactly(response.writeHead, 204);
+      });
+    });
+
     it('Updates a subscriptions cancel_at_period_end via the member repository', async function () {
       const tokenService = {
         decodeToken: sinon.fake.resolves({ sub: 'fake@email.com' }),

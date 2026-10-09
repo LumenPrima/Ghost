@@ -1,3 +1,4 @@
+const errors = require('@tryghost/errors'); // fork(salvare)
 const logging = require('@tryghost/logging');
 
 /**
@@ -10,6 +11,7 @@ module.exports = class ChargeRefundedEventService {
   /**
    * @param {object} deps
    * @param {object} deps.giftService
+   * @param {object} [deps.purchaseService] fork(salvare): the purchases module's service (lazy getter)
    */
   constructor(deps) {
     this.deps = deps;
@@ -38,6 +40,8 @@ module.exports = class ChargeRefundedEventService {
     // repository; non-matching charges (subscription renewals, donations,
     // unrelated one-time payments) are no-ops.
     await this.handleGiftRefundEvent(paymentIntentId);
+    // fork(salvare): a payment intent matches at most one of gift or purchase, so order does not matter
+    await this.handlePurchaseRefundEvent(charge, paymentIntentId);
   }
 
   /**
@@ -55,6 +59,42 @@ module.exports = class ChargeRefundedEventService {
     if (!refunded) {
       logging.info(
         `charge.refunded: no gift found for payment_intent ${paymentIntentId}, skipping`,
+      );
+    }
+  }
+
+  /**
+   * fork(salvare): Handles a refund for a one-time tier purchase
+   *
+   * Purchases are matched by payment intent ID. Only a full refund revokes access.
+   *
+   * @param {import('stripe').Stripe.Charge} charge
+   * @param {string} paymentIntentId
+   * @private
+   */
+  async handlePurchaseRefundEvent(charge, paymentIntentId) {
+    if (!('purchaseService' in this.deps)) {
+      // Only constructions that predate purchases (old unit tests) lack the dependency
+      return;
+    }
+
+    const purchaseService = this.deps.purchaseService;
+    if (!purchaseService) {
+      // A wiring fault must not answer 2xx, or Stripe never redelivers the refund
+      throw new errors.InternalServerError({
+        message: 'Purchase service is not initialised',
+        context: `Unable to process refund for payment_intent ${paymentIntentId}`,
+      });
+    }
+
+    const handled = await purchaseService.refund({
+      paymentIntentId,
+      fullyRefunded: charge.refunded === true,
+    });
+
+    if (!handled) {
+      logging.info(
+        `charge.refunded: no purchase found for payment_intent ${paymentIntentId}, skipping`,
       );
     }
   }

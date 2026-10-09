@@ -41,6 +41,7 @@ module.exports = class StripeService {
    * @param {*} deps.membersService
    * @param {*} deps.donationService
    * @param {*} deps.giftService
+   * @param {*} deps.purchaseService fork(salvare): the purchases module; its `.service` is read lazily
    * @param {*} deps.staffService
    * @param {import('./webhook-manager').StripeWebhook} deps.StripeWebhook
    * @param {object} deps.settingsCache
@@ -58,6 +59,7 @@ module.exports = class StripeService {
     membersService,
     donationService,
     giftService,
+    purchaseService, // fork(salvare)
     staffService,
     StripeWebhook,
     settingsCache,
@@ -118,6 +120,10 @@ module.exports = class StripeService {
       get giftService() {
         return giftService.service;
       },
+      // fork(salvare)
+      get purchaseService() {
+        return purchaseService.service;
+      },
       get staffServiceEmails() {
         return staffService.api.emails;
       },
@@ -145,6 +151,10 @@ module.exports = class StripeService {
     const chargeRefundedEventService = new ChargeRefundedEventService({
       get giftService() {
         return giftService.service;
+      },
+      // fork(salvare)
+      get purchaseService() {
+        return purchaseService.service;
       },
     });
 

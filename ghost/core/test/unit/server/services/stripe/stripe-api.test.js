@@ -1222,4 +1222,246 @@ describe('StripeAPI', function () {
       assert.equal(args.tax_id_collection, undefined);
     });
   });
+
+  // fork(salvare): one-time tier purchases
+  describe('createPurchaseCheckoutSession', function () {
+    const baseConfig = {
+      checkoutSessionSuccessUrl: '/success',
+      checkoutSessionCancelUrl: '/cancel',
+      checkoutSetupSessionSuccessUrl: '/setup-success',
+      checkoutSetupSessionCancelUrl: '/setup-cancel',
+      secretKey: '',
+    };
+    const metadata = {
+      ghost_purchase_tier_id: 'tier_course',
+      attribution_id: 'post_1',
+      utm_source: 'newsletter',
+    };
+
+    beforeEach(function () {
+      mockStripe = {
+        checkout: {
+          sessions: {
+            create: sinon.stub().resolves({ id: 'cs_1', url: 'https://checkout.stripe.com/cs_1' }),
+          },
+        },
+      };
+
+      sinon.stub(mockLabs, 'isSet');
+      sinon.stub(stripe, 'Stripe').returns(mockStripe);
+
+      api.configure(baseConfig);
+    });
+
+    afterEach(function () {
+      sinon.restore();
+    });
+
+    it('creates a payment-mode session for the stored one-time price', async function () {
+      const session = await api.createPurchaseCheckoutSession({
+        priceId: 'price_one_time',
+        metadata,
+        successUrl: '/purchase-success',
+        cancelUrl: '/purchase-cancel',
+        customer: null,
+        customerEmail: mockCustomerEmail,
+      });
+
+      assert.deepEqual(session, { id: 'cs_1', url: 'https://checkout.stripe.com/cs_1' });
+      const args = mockStripe.checkout.sessions.create.firstCall.firstArg;
+
+      assert.equal(args.mode, 'payment');
+      assert.equal(args.submit_type, 'pay');
+      assert.deepEqual(args.managed_payments, { enabled: false });
+      assert.equal(args.success_url, '/purchase-success');
+      assert.equal(args.cancel_url, '/purchase-cancel');
+      assert.deepEqual(args.line_items, [{ price: 'price_one_time', quantity: 1 }]);
+      assert.equal(args.payment_method_types, undefined);
+      assert.equal(args.allow_promotion_codes, undefined);
+      assert.equal(args.custom_fields, undefined);
+    });
+
+    it('copies metadata onto the session, the invoice and the payment intent', async function () {
+      await api.createPurchaseCheckoutSession({
+        priceId: 'price_one_time',
+        metadata,
+        customer: null,
+        customerEmail: null,
+      });
+
+      const args = mockStripe.checkout.sessions.create.firstCall.firstArg;
+
+      assert.deepEqual(args.metadata, metadata);
+      assert.deepEqual(args.invoice_creation, {
+        enabled: true,
+        invoice_data: { metadata },
+      });
+      assert.deepEqual(args.payment_intent_data, { metadata });
+    });
+
+    it('sets no statement descriptor', async function () {
+      await api.createPurchaseCheckoutSession({
+        priceId: 'price_one_time',
+        metadata,
+        customer: null,
+        customerEmail: null,
+      });
+
+      const args = mockStripe.checkout.sessions.create.firstCall.firstArg;
+
+      assert.equal(args.payment_intent_data.statement_descriptor, undefined);
+      assert.equal(args.payment_intent_data.statement_descriptor_suffix, undefined);
+    });
+
+    it('falls back to the configured success and cancel URLs', async function () {
+      await api.createPurchaseCheckoutSession({
+        priceId: 'price_one_time',
+        metadata,
+        customer: null,
+        customerEmail: null,
+      });
+
+      const args = mockStripe.checkout.sessions.create.firstCall.firstArg;
+
+      assert.equal(args.success_url, '/success');
+      assert.equal(args.cancel_url, '/cancel');
+    });
+
+    it('passes the customer ID and no email when a customer is provided', async function () {
+      await api.createPurchaseCheckoutSession({
+        priceId: 'price_one_time',
+        metadata,
+        customer: { id: mockCustomerId },
+        customerEmail: mockCustomerEmail,
+      });
+
+      const args = mockStripe.checkout.sessions.create.firstCall.firstArg;
+
+      assert.equal(args.customer, mockCustomerId);
+      assert.equal(args.customer_email, undefined);
+    });
+
+    it('passes customer_email when no customer is provided', async function () {
+      await api.createPurchaseCheckoutSession({
+        priceId: 'price_one_time',
+        metadata,
+        customer: null,
+        customerEmail: mockCustomerEmail,
+      });
+
+      const args = mockStripe.checkout.sessions.create.firstCall.firstArg;
+
+      assert.equal(args.customer, undefined);
+      assert.equal(args.customer_email, mockCustomerEmail);
+    });
+
+    it('passes neither customer nor email when both are missing', async function () {
+      await api.createPurchaseCheckoutSession({
+        priceId: 'price_one_time',
+        metadata,
+        customer: null,
+        customerEmail: null,
+      });
+
+      const args = mockStripe.checkout.sessions.create.firstCall.firstArg;
+
+      assert.equal(args.customer, undefined);
+      assert.equal(args.customer_email, undefined);
+    });
+
+    it('applies the automatic tax options when automatic tax is enabled', async function () {
+      api.configure({ ...baseConfig, enableAutomaticTax: true });
+
+      await api.createPurchaseCheckoutSession({
+        priceId: 'price_one_time',
+        metadata,
+        customer: { id: mockCustomerId },
+        customerEmail: null,
+      });
+
+      const args = mockStripe.checkout.sessions.create.firstCall.firstArg;
+
+      assert.deepEqual(args.automatic_tax, { enabled: true });
+      assert.deepEqual(args.tax_id_collection, { enabled: true });
+      assert.deepEqual(args.customer_update, { address: 'auto', name: 'auto' });
+    });
+
+    it('does not set customer_update with automatic tax but no customer', async function () {
+      api.configure({ ...baseConfig, enableAutomaticTax: true });
+
+      await api.createPurchaseCheckoutSession({
+        priceId: 'price_one_time',
+        metadata,
+        customer: null,
+        customerEmail: mockCustomerEmail,
+      });
+
+      const args = mockStripe.checkout.sessions.create.firstCall.firstArg;
+
+      assert.deepEqual(args.tax_id_collection, { enabled: true });
+      assert.equal(args.customer_update, undefined);
+    });
+
+    it('adds no tax options when automatic tax is disabled', async function () {
+      api.configure({ ...baseConfig, enableAutomaticTax: false });
+
+      await api.createPurchaseCheckoutSession({
+        priceId: 'price_one_time',
+        metadata,
+        customer: { id: mockCustomerId },
+        customerEmail: null,
+      });
+
+      const args = mockStripe.checkout.sessions.create.firstCall.firstArg;
+
+      assert.deepEqual(args.automatic_tax, { enabled: false });
+      assert.equal(args.tax_id_collection, undefined);
+      assert.equal(args.customer_update, undefined);
+    });
+  });
+
+  // fork(salvare): refund-before-fulfilment check
+  describe('getPaymentIntent', function () {
+    beforeEach(function () {
+      mockStripe = {
+        paymentIntents: {
+          retrieve: sinon.stub().resolves({
+            id: 'pi_1',
+            charges: { data: [{ id: 'ch_1', refunded: false }] },
+          }),
+        },
+      };
+
+      sinon.stub(mockLabs, 'isSet');
+      sinon.stub(stripe, 'Stripe').returns(mockStripe);
+
+      api.configure({ secretKey: '' });
+    });
+
+    afterEach(function () {
+      sinon.restore();
+    });
+
+    it('retrieves the payment intent by id', async function () {
+      const paymentIntent = await api.getPaymentIntent('pi_1');
+
+      sinon.assert.calledOnceWithExactly(mockStripe.paymentIntents.retrieve, 'pi_1', {});
+      assert.equal(paymentIntent.id, 'pi_1');
+      assert.equal(paymentIntent.charges.data[0].refunded, false);
+    });
+
+    it('passes retrieve options through', async function () {
+      await api.getPaymentIntent('pi_1', { expand: ['charges'] });
+
+      sinon.assert.calledOnceWithExactly(mockStripe.paymentIntents.retrieve, 'pi_1', {
+        expand: ['charges'],
+      });
+    });
+
+    it('propagates Stripe errors', async function () {
+      mockStripe.paymentIntents.retrieve.rejects(new Error('No such payment_intent'));
+
+      await assert.rejects(api.getPaymentIntent('pi_missing'), /No such payment_intent/);
+    });
+  });
 });

@@ -827,6 +827,66 @@ module.exports = class StripeAPI {
   }
 
   /**
+   * fork(salvare): Create a new Stripe Checkout Session for a one-time purchase of a tier.
+   *
+   * @param {object} options
+   * @param {string} options.priceId Stored Stripe `one_time` price for the tier
+   * @param {Object.<string, string>} options.metadata Copied onto the session, the invoice and the payment intent
+   * @param {string} [options.successUrl]
+   * @param {string} [options.cancelUrl]
+   * @param {ICustomer|{id: string}|null} [options.customer]
+   * @param {string|null} [options.customerEmail]
+   *
+   * @returns {Promise<ICheckoutSession>}
+   */
+  async createPurchaseCheckoutSession({
+    priceId,
+    metadata,
+    successUrl,
+    cancelUrl,
+    customer,
+    customerEmail,
+  }) {
+    await this._rateLimitBucket.throttle();
+
+    const stripeSessionOptions = {
+      mode: 'payment',
+      managed_payments: MANAGED_PAYMENTS_DISABLED,
+      success_url: successUrl || this._config.checkoutSessionSuccessUrl,
+      cancel_url: cancelUrl || this._config.checkoutSessionCancelUrl,
+      automatic_tax: {
+        enabled: this._config.enableAutomaticTax,
+      },
+      metadata,
+      customer: customer ? customer.id : undefined,
+      customer_email: !customer && customerEmail ? customerEmail : undefined,
+      submit_type: 'pay',
+      invoice_creation: {
+        enabled: true,
+        invoice_data: {
+          // Stripe does not inherit Checkout Session metadata for invoice records
+          metadata,
+        },
+      },
+      payment_intent_data: {
+        metadata,
+      },
+      line_items: [
+        {
+          price: priceId,
+          quantity: 1,
+        },
+      ],
+    };
+
+    this._applyAutomaticTaxSessionOptions(stripeSessionOptions, { hasCustomer: Boolean(customer) });
+
+    const session = await this._stripe.checkout.sessions.create(stripeSessionOptions);
+
+    return session;
+  }
+
+  /**
    * Create a new Stripe Checkout Setup Session.
    *
    * @param {ICustomer} customer
@@ -1076,6 +1136,20 @@ module.exports = class StripeAPI {
   async getSetupIntent(id, options = {}) {
     await this._rateLimitBucket.throttle();
     return await this._stripe.setupIntents.retrieve(id, options);
+  }
+
+  /**
+   * fork(salvare): Retrieve a PaymentIntent by ID.
+   * At the pinned API version (2020-08-27) the response includes `charges.data[]`, which carry `refunded`.
+   *
+   * @param {string} id
+   * @param {import('stripe').Stripe.PaymentIntentRetrieveParams} [options]
+   *
+   * @returns {Promise<import('stripe').Stripe.PaymentIntent>}
+   */
+  async getPaymentIntent(id, options = {}) {
+    await this._rateLimitBucket.throttle();
+    return await this._stripe.paymentIntents.retrieve(id, options);
   }
 
   /**

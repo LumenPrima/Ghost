@@ -130,6 +130,28 @@ describe('gift checkout offer', function () {
       }
     });
 
+    // fork(salvare)
+    it('rejects public tiers that have a one-time price', function () {
+      assert.throws(
+        () =>
+          validateGiftCheckoutOffer({
+            tier: { ...tier, oneTimePrice: 9900 },
+            portalPlans: ['monthly', 'yearly'],
+            offer: resolveGiftDuration({ duration: 3 }),
+          }),
+        BadRequestError,
+      );
+
+      assert.equal(
+        validateGiftCheckoutOffer({
+          tier: { ...tier, oneTimePrice: null },
+          portalPlans: ['monthly', 'yearly'],
+          offer: resolveGiftDuration({ duration: 3 }),
+        }).amount,
+        1500,
+      );
+    });
+
     it('rejects durations disabled in Portal', function () {
       assert.throws(
         () =>

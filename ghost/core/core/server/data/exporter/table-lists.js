@@ -66,6 +66,7 @@ const BACKUP_TABLES = [
   'outbox',
   'gift_deliveries',
   'gifts',
+  'members_purchases', // fork(salvare)
   'gift_links',
   'post_gift_links',
   'automations',

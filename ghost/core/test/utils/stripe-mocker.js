@@ -26,6 +26,7 @@ class StripeMocker {
   prices = [];
   products = [];
   checkoutSessions = [];
+  paymentIntents = []; // fork(salvare)
 
   nockInterceptors = [];
 
@@ -48,6 +49,7 @@ class StripeMocker {
     this.prices = [];
     this.products = [];
     this.checkoutSessions = [];
+    this.paymentIntents = []; // fork(salvare)
 
     // Fix for now, because of importing order breaking some things when they are not initialized
     members = require('../../core/server/services/members');
@@ -427,6 +429,11 @@ class StripeMocker {
         return this.#getData(this.products, id);
       }
 
+      // fork(salvare): purchase webhooks fetch the PaymentIntent to detect a refund that landed first
+      if (resource === 'payment_intents') {
+        return [200, this.getPaymentIntent(id)];
+      }
+
       return [500];
     });
 
@@ -500,6 +507,47 @@ class StripeMocker {
   async sendWebhook(event) {
     const webhookController = stripeService.webhookController;
     await webhookController.handleEvent(event);
+  }
+
+  // fork(salvare): PaymentIntents for one-time purchases ------------------------------
+
+  /**
+   * Returns the mocked PaymentIntent, creating an unrefunded one on first access, so a
+   * purchase webhook can name any payment intent without setting it up first.
+   * At the pinned API version (2020-08-27) a PaymentIntent carries `charges.data[]`.
+   *
+   * @param {string} id
+   * @returns {object} - The PaymentIntent object.
+   */
+  getPaymentIntent(id) {
+    let paymentIntent = this.paymentIntents.find((p) => p.id === id);
+    if (!paymentIntent) {
+      paymentIntent = {
+        id,
+        object: 'payment_intent',
+        status: 'succeeded',
+        charges: {
+          object: 'list',
+          data: [{ id: `ch_${this.#generateRandomId()}`, object: 'charge', refunded: false }],
+        },
+      };
+      this.paymentIntents.push(paymentIntent);
+    }
+    return paymentIntent;
+  }
+
+  /**
+   * Marks every charge of a PaymentIntent as fully refunded (without sending a webhook).
+   *
+   * @param {string} id
+   * @returns {object} - The PaymentIntent object.
+   */
+  refundPaymentIntent(id) {
+    const paymentIntent = this.getPaymentIntent(id);
+    for (const charge of paymentIntent.charges.data) {
+      charge.refunded = true;
+    }
+    return paymentIntent;
   }
 }
 

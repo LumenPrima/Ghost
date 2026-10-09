@@ -11,6 +11,7 @@ const { getConfig } = require('./config');
 const settingsHelpers = require('../settings-helpers');
 const donationService = require('../donations');
 const giftService = require('../gifts');
+const purchaseService = require('../purchases'); // fork(salvare)
 const staffService = require('../staff');
 const labs = require('../../../shared/labs');
 const settingsCache = require('../../../shared/settings-cache');
@@ -71,6 +72,7 @@ module.exports = new StripeService({
   },
   donationService,
   giftService,
+  purchaseService, // fork(salvare)
   staffService,
   settingsCache,
 });

@@ -357,6 +357,7 @@ async function initServices({ ghostServer, config, prometheusClient, jobsService
   const contentImport = require('./server/services/content-import');
   const donationService = require('./server/services/donations');
   const giftService = require('./server/services/gifts');
+  const purchaseService = require('./server/services/purchases'); // fork(salvare)
   const machinePaymentsService = require('./server/services/machine-payments');
   const recommendationsService = require('./server/services/recommendations');
   const emailAddressService = require('./server/services/email-address');
@@ -387,6 +388,7 @@ async function initServices({ ghostServer, config, prometheusClient, jobsService
     schedulerAdapter,
     internalKeys,
   });
+  purchaseService.init(); // fork(salvare)
   const giftDeliveryService = giftService.deliveryService;
   assert(giftDeliveryService, 'Gift delivery service should be initialized');
   if (ghostServer) {

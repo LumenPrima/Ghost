@@ -148,6 +148,18 @@ module.exports = class Tier {
     this.#yearlyPrice = validateYearlyPrice(value, this.#type);
   }
 
+  // fork(salvare): one-time purchase price in minor units, null when the tier is not sold
+  // as a one-time purchase. Like the monthly/yearly setters this queues no event: the
+  // Stripe one-time price is resolved lazily at checkout by the purchases service.
+  /** @type {number|null} */
+  #oneTimePrice;
+  get oneTimePrice() {
+    return this.#oneTimePrice;
+  }
+  set oneTimePrice(value) {
+    this.#oneTimePrice = validateOneTimePrice(value, this.#type);
+  }
+
   updatePricing({ currency, monthlyPrice, yearlyPrice }) {
     if (this.#type !== 'paid' && (currency || monthlyPrice || yearlyPrice)) {
       throw new ValidationError({
@@ -204,6 +216,7 @@ module.exports = class Tier {
       currency: this.#currency,
       monthlyPrice: this.#monthlyPrice,
       yearlyPrice: this.#yearlyPrice,
+      oneTimePrice: this.#oneTimePrice, // fork(salvare)
       createdAt: this.#createdAt,
       updatedAt: this.#updatedAt,
       benefits: this.#benefits,
@@ -226,6 +239,7 @@ module.exports = class Tier {
     this.#currency = data.currency;
     this.#monthlyPrice = data.monthly_price;
     this.#yearlyPrice = data.yearly_price;
+    this.#oneTimePrice = data.one_time_price ?? null; // fork(salvare)
     this.#createdAt = data.created_at;
     this.#updatedAt = data.updated_at;
     this.#benefits = data.benefits;
@@ -263,6 +277,7 @@ module.exports = class Tier {
     let trialDays = validateTrialDays(data.trialDays || 0, type);
     let monthlyPrice = validateMonthlyPrice(data.monthlyPrice || null, type);
     let yearlyPrice = validateYearlyPrice(data.yearlyPrice || null, type);
+    let oneTimePrice = validateOneTimePrice(data.oneTimePrice ?? null, type); // fork(salvare)
     let createdAt = validateCreatedAt(data.createdAt);
     let updatedAt = validateUpdatedAt(data.updatedAt);
     let benefits = validateBenefits(data.benefits);
@@ -280,6 +295,7 @@ module.exports = class Tier {
       currency,
       monthly_price: monthlyPrice,
       yearly_price: yearlyPrice,
+      one_time_price: oneTimePrice, // fork(salvare)
       created_at: createdAt,
       updated_at: updatedAt,
       benefits,
@@ -471,6 +487,32 @@ function validateYearlyPrice(value, type) {
   if (value > 9999999999) {
     throw new ValidationError({
       message: 'Tier prices may not exceed 999999.99',
+    });
+  }
+  return value;
+}
+
+// fork(salvare): products.one_time_price is INT UNSIGNED
+const MAX_ONE_TIME_PRICE = 4294967295;
+
+// fork(salvare)
+function validateOneTimePrice(value, type) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (type === 'free') {
+    throw new ValidationError({
+      message: 'Free Tiers cannot have a one-time price',
+    });
+  }
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new ValidationError({
+      message: 'Tier one-time price must be a positive integer.',
+    });
+  }
+  if (value > MAX_ONE_TIME_PRICE) {
+    throw new ValidationError({
+      message: 'Tier one-time price may not exceed 42949672.95',
     });
   }
   return value;

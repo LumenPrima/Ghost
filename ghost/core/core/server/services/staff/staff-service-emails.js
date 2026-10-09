@@ -433,6 +433,58 @@ class StaffServiceEmails {
     });
   }
 
+  // fork(salvare): staff email for a one-time tier purchase (services/purchases)
+  /**
+   * @param {object} eventData
+   * @param {string|null} eventData.name
+   * @param {string} eventData.email
+   * @param {string|null} eventData.memberId
+   * @param {number} eventData.amount - amount in cents
+   * @param {string} eventData.currency
+   * @param {string} eventData.tierName
+   * @param {boolean} [eventData.possibleDuplicate] - the member already held this tier through an active purchase
+   *
+   * @returns {Promise<void>}
+   */
+  async notifyPurchaseReceived({
+    name,
+    email,
+    memberId,
+    amount,
+    currency,
+    tierName,
+    possibleDuplicate = false,
+  }) {
+    const users = await this.models.User.getEmailAlertUsers('paid-started');
+    const formattedAmount = this.getFormattedAmount({ currency, amount: amount / 100 });
+
+    const displayName = name ?? email;
+    const subjectPrefix = possibleDuplicate ? '⚠️ Possible duplicate purchase' : '💳 Purchase';
+    const subject = `${subjectPrefix}: ${tierName} — ${formattedAmount} from ${displayName}`;
+    const memberData = memberId
+      ? this.getMemberData({
+          id: memberId,
+          name: name ?? null,
+          email,
+        })
+      : null;
+
+    await this.sendToStaff({
+      users,
+      subject,
+      template: 'purchase',
+      memberData,
+      templateData: {
+        purchase: {
+          name: displayName,
+          amount: formattedAmount,
+          tierName,
+          possibleDuplicate: !!possibleDuplicate,
+        },
+      },
+    });
+  }
+
   // Utils
 
   /** @private */

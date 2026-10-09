@@ -10,6 +10,7 @@ export interface GiftCheckoutTier {
   currency: string | null;
   monthlyPrice: number | null;
   yearlyPrice: number | null;
+  oneTimePrice?: number | null; // fork(salvare)
 }
 
 interface GiftDurationDefinition {
@@ -133,7 +134,13 @@ export function validateGiftCheckoutOffer({
   portalPlans: unknown;
   offer: ResolvedGiftDuration;
 }): GiftCheckoutPlan {
-  if (tier.status !== 'active' || tier.visibility !== 'public' || tier.type !== 'paid') {
+  // fork(salvare): tiers with a one-time price are purchase-only, never giftable
+  if (
+    tier.status !== 'active' ||
+    tier.visibility !== 'public' ||
+    tier.type !== 'paid' ||
+    tier.oneTimePrice
+  ) {
     throw invalidGiftOffer('The requested tier is not available for gift purchases');
   }
 

@@ -713,6 +713,7 @@ module.exports = {
     currency: { type: 'string', maxlength: 50, nullable: true },
     monthly_price: { type: 'integer', unsigned: true, nullable: true },
     yearly_price: { type: 'integer', unsigned: true, nullable: true },
+    one_time_price: { type: 'integer', unsigned: true, nullable: true }, // fork(salvare): one-time purchase price, minor units
     created_at: { type: 'dateTime', nullable: false },
     updated_at: { type: 'dateTime', nullable: true },
     // To be removed in future
@@ -803,6 +804,62 @@ module.exports = {
     },
     sort_order: { type: 'integer', nullable: false, unsigned: true, defaultTo: 0 },
     expiry_at: { type: 'dateTime', nullable: true },
+  },
+  // fork(salvare): one-time purchases of tiers. A members_products link is "purchase-sourced"
+  // while a paid, unexpired row exists for (member_id, product_id).
+  members_purchases: {
+    id: { type: 'string', maxlength: 24, nullable: false, primary: true },
+    member_id: {
+      type: 'string',
+      maxlength: 24,
+      nullable: true,
+      unique: false,
+      references: 'members.id',
+      setNullDelete: true,
+    },
+    product_id: {
+      type: 'string',
+      maxlength: 24,
+      nullable: false,
+      unique: false,
+      references: 'products.id',
+    },
+    stripe_checkout_session_id: { type: 'string', maxlength: 255, nullable: true, unique: true },
+    stripe_payment_intent_id: { type: 'string', maxlength: 255, nullable: true, unique: true },
+    stripe_customer_id: { type: 'string', maxlength: 255, nullable: true },
+    amount: { type: 'integer', nullable: false, unsigned: true },
+    currency: { type: 'string', maxlength: 50, nullable: false },
+    status: {
+      type: 'string',
+      maxlength: 50,
+      nullable: false,
+      defaultTo: 'paid',
+      validations: { isIn: [['paid', 'refunded']] },
+    },
+    expires_at: { type: 'dateTime', nullable: true },
+    refunded_at: { type: 'dateTime', nullable: true },
+    // attribution values from ghost-history (member attribution tracking script)
+    attribution_id: { type: 'string', maxlength: 24, nullable: true },
+    attribution_type: {
+      type: 'string',
+      maxlength: 50,
+      nullable: true,
+      validations: {
+        isIn: [['url', 'post', 'page', 'author', 'tag']],
+      },
+    },
+    attribution_url: { type: 'string', maxlength: 2000, nullable: true },
+    referrer_source: { type: 'string', maxlength: 191, nullable: true },
+    referrer_medium: { type: 'string', maxlength: 191, nullable: true },
+    referrer_url: { type: 'string', maxlength: 2000, nullable: true },
+    utm_source: { type: 'string', maxlength: 191, nullable: true },
+    utm_medium: { type: 'string', maxlength: 191, nullable: true },
+    utm_campaign: { type: 'string', maxlength: 191, nullable: true },
+    utm_term: { type: 'string', maxlength: 191, nullable: true },
+    utm_content: { type: 'string', maxlength: 191, nullable: true },
+    created_at: { type: 'dateTime', nullable: false },
+    updated_at: { type: 'dateTime', nullable: true },
+    '@@INDEXES@@': [['member_id', 'product_id']],
   },
   posts_products: {
     id: { type: 'string', maxlength: 24, nullable: false, primary: true },

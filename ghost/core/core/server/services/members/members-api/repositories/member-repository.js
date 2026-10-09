@@ -62,6 +62,12 @@ const MEMBER_STATUSES = ['free', 'paid', 'comped', 'gift'];
  * @prop {(token: string) => Promise<import('jsonwebtoken').JwtPayload>} decodeToken
  */
 
+/**
+ * fork(salvare): purchase-links bound to knex (services/purchases/purchase-links.ts)
+ * @typedef {object} IPurchaseLinks
+ * @prop {(memberId: string, options?: {transacting?: Knex.Transaction}) => Promise<Array<{id: string, expiry_at: Date | null}>>} getPurchaseSourcedProducts
+ */
+
 module.exports = class MemberRepository {
   /**
    * @param {object} deps
@@ -84,6 +90,7 @@ module.exports = class MemberRepository {
    * @param {Pick<automationsApi, 'trigger'>} deps.automationsApi
    * @param {any} deps.Automation
    * @param {any} deps.WelcomeEmailAutomationRun
+   * @param {IPurchaseLinks} [deps.purchaseLinks] fork(salvare): reads purchase-sourced products
    */
   constructor({
     Member,
@@ -105,6 +112,7 @@ module.exports = class MemberRepository {
     automationsApi,
     Automation,
     WelcomeEmailAutomationRun,
+    purchaseLinks, // fork(salvare)
   }) {
     this._Member = Member;
     this._MemberNewsletter = MemberNewsletter;
@@ -125,6 +133,7 @@ module.exports = class MemberRepository {
     this._automationsApi = automationsApi;
     this._Automation = Automation;
     this._WelcomeEmailAutomationRun = WelcomeEmailAutomationRun;
+    this._purchaseLinks = purchaseLinks; // fork(salvare)
 
     DomainEvents.subscribe(OfferRedemptionEvent, async function (event) {
       if (!event.data.offerId) {
@@ -751,12 +760,23 @@ module.exports = class MemberRepository {
 
     const memberStatusData = {};
 
+    // fork(salvare): purchase-sourced links belong to members_purchases, not to this caller.
+    // They are left out of the comp diff below and re-attached before the edit.
+    const purchaseSourced = data.products
+      ? await this._getPurchaseSourcedProducts(options.id, sharedOptions)
+      : [];
+    const purchaseIds = purchaseSourced.map((product) => product.id);
+
     let productsToAdd = [];
     let productsToRemove = [];
     if (needsProducts) {
       const existingProducts = initialMember.related('products').models;
-      const existingProductIds = existingProducts.map((product) => product.id);
-      const incomingProductIds = data.products.map((product) => product.id);
+      const existingProductIds = existingProducts
+        .map((product) => product.id)
+        .filter((id) => !purchaseIds.includes(id)); // fork(salvare)
+      const incomingProductIds = data.products
+        .map((product) => product.id)
+        .filter((id) => !purchaseIds.includes(id)); // fork(salvare)
 
       if (incomingProductIds.length > 1 && incomingProductIds.length > existingProductIds.length) {
         throw new errors.BadRequestError({ message: tpl(messages.moreThanOneProduct) });
@@ -817,6 +837,19 @@ module.exports = class MemberRepository {
           // CASE: We are changing products & there were no active stripe subscriptions - the member gets non-Stripe access
           memberStatusData.status = data.status || 'comped';
         }
+      }
+
+      // fork(salvare): a gift member whose gift tier is also purchased holds only a purchase-sourced
+      // link, so the gift lifecycle's {products: [], status: 'free'} changes no products. Still
+      // honour the gift -> free transition, or the member stays 'gift' with no active gift.
+      if (
+        purchaseIds.length &&
+        existingProductIds.length === 0 &&
+        incomingProductIds.length === 0 &&
+        data.status === 'free' &&
+        initialMember.get('status') === 'gift'
+      ) {
+        memberStatusData.status = 'free';
       }
     }
 
@@ -884,6 +917,13 @@ module.exports = class MemberRepository {
       if (memberData.newsletters && archivedNewsletters.length > 0) {
         archivedNewsletters.forEach((n) => memberData.newsletters.push(n));
       }
+    }
+
+    // fork(salvare): re-attach purchase-sourced links the caller omitted, forcing the purchase's expiry
+    if (memberData.products && purchaseSourced.length) {
+      memberData.products = memberData.products
+        .filter((product) => !purchaseIds.includes(product.id))
+        .concat(purchaseSourced.map((product) => ({ ...product })));
     }
 
     const member = await this._Member.edit(
@@ -1152,13 +1192,17 @@ module.exports = class MemberRepository {
     }
   }
 
-  async upsertCustomer(data) {
-    return await this._StripeCustomer.upsert({
-      customer_id: data.customer_id,
-      member_id: data.member_id,
-      name: data.name,
-      email: data.email,
-    });
+  // fork(salvare): options (e.g. transacting) are passed through to the upsert
+  async upsertCustomer(data, options) {
+    return await this._StripeCustomer.upsert(
+      {
+        customer_id: data.customer_id,
+        member_id: data.member_id,
+        name: data.name,
+        email: data.email,
+      },
+      options,
+    );
   }
 
   async linkStripeCustomer(data, options) {
@@ -1684,9 +1728,16 @@ module.exports = class MemberRepository {
       }
     }
 
+    // fork(salvare): purchase-sourced links survive subscription changes and do not count towards 'comped'
+    const purchaseIds = (await this._getPurchaseSourcedProducts(data.id, options)).map(
+      (product) => product.id,
+    );
+    const withoutPurchases = (products) =>
+      products.filter((product) => !purchaseIds.includes(product.id));
+
     let memberProducts = (await memberModel.related('products').fetch(options)).toJSON();
     const oldMemberProducts = memberModel.related('products').toJSON();
-    let status = memberProducts.length === 0 ? 'free' : 'comped';
+    let status = withoutPurchases(memberProducts).length === 0 ? 'free' : 'comped'; // fork(salvare)
     if (
       !stripeCustomerSubscriptionModelShouldBeDeleted &&
       this.isActiveSubscriptionStatus(stripeSubscriptionData.status)
@@ -1750,7 +1801,7 @@ module.exports = class MemberRepository {
           if (!activeSubscriptionForPreviousProduct) {
             // We can safely remove the product from this member because it doesn't have any other remaining active subscription for it
             memberProducts = memberProducts.filter((product) => {
-              return product.id !== previousProduct.id;
+              return product.id !== previousProduct.id || purchaseIds.includes(product.id); // fork(salvare)
             });
           }
         }
@@ -1795,11 +1846,16 @@ module.exports = class MemberRepository {
       if (!activeSubscriptionForGhostProduct) {
         // We don't have an active subscription for this product anymore, so we can safely unlink it from the member
         memberProducts = memberProducts.filter((product) => {
-          return product.id !== ghostProduct.id;
+          return product.id !== ghostProduct.id || purchaseIds.includes(product.id); // fork(salvare)
         });
       }
 
-      if (memberProducts.length === 0) {
+      // fork(salvare): when no active subscription was found, purchase-sourced links alone do not
+      // keep 'comped'. An active subscription ('paid') keeps its status even if its tier is purchased.
+      if (
+        memberProducts.length === 0 ||
+        (status !== 'paid' && withoutPurchases(memberProducts).length === 0)
+      ) {
         // If all products were removed, set the status back to 'free'
         status = 'free';
       }
@@ -2646,16 +2702,209 @@ module.exports = class MemberRepository {
     }
 
     // 2. Remove Ghost-only comp products (products not backed by any active Stripe subscription)
-    await member.load(
-      [
-        'products',
-        'stripeSubscriptions',
-        'stripeSubscriptions.stripePrice',
-        'stripeSubscriptions.stripePrice.stripeProduct',
-      ],
-      options,
+    // fork(salvare): step 2 runs in a transaction holding the member row lock. grantPurchasedProduct
+    // takes the same lock, so a purchase link cannot commit between the read below and the edit,
+    // which would otherwise detach it as missing from the stale list. Step 1 stays unlocked: its
+    // linkSubscription calls edit this same row outside any transaction.
+    const removeGhostOnlyComps = async (transacting) => {
+      const txOptions = { ...options, transacting };
+      await this._Member.findOne({ id }, { transacting, forUpdate: true });
+      await member.load(
+        [
+          'products',
+          'stripeSubscriptions',
+          'stripeSubscriptions.stripePrice',
+          'stripeSubscriptions.stripePrice.stripeProduct',
+        ],
+        txOptions,
+      );
+
+      const activeSubscriptionProductIds = new Set(
+        member
+          .related('stripeSubscriptions')
+          .models.filter((sub) => this.isActiveSubscriptionStatus(sub.get('status')))
+          .map((sub) => sub.related('stripePrice')?.related('stripeProduct')?.get('product_id'))
+          .filter(Boolean),
+      );
+
+      // fork(salvare): purchase-sourced links are not comps
+      const purchaseIds = (await this._getPurchaseSourcedProducts(id, txOptions)).map(
+        (product) => product.id,
+      );
+
+      const currentProducts = member.related('products').toJSON();
+      const filteredProducts = currentProducts.filter(
+        (product) =>
+          activeSubscriptionProductIds.has(product.id) || purchaseIds.includes(product.id), // fork(salvare)
+      );
+
+      if (filteredProducts.length !== currentProducts.length) {
+        await this._Member.edit({ products: filteredProducts }, { id, transacting });
+      }
+    };
+
+    if (options?.transacting) {
+      await removeGhostOnlyComps(options.transacting);
+    } else {
+      await this._Member.transaction(removeGhostOnlyComps);
+    }
+
+    return true;
+  }
+
+  // fork(salvare): one-time purchases --------------------------------------------------
+
+  /**
+   * Products this member holds through a paid, unexpired one-time purchase.
+   * Returns [] when purchase links are not wired (keeps upstream unit tests unchanged).
+   *
+   * @param {string} memberId
+   * @param {object} [options]
+   * @param {Knex.Transaction} [options.transacting]
+   * @returns {Promise<Array<{id: string, expiry_at: Date | null}>>}
+   */
+  async _getPurchaseSourcedProducts(memberId, options = {}) {
+    if (!this._purchaseLinks || !memberId) {
+      return [];
+    }
+    return this._purchaseLinks.getPurchaseSourcedProducts(
+      memberId,
+      options?.transacting ? { transacting: options.transacting } : {},
+    );
+  }
+
+  /**
+   * Links a purchased product to a member without the comp guards in update().
+   * Idempotent: an existing link only has its expiry reset to the purchase expiry.
+   * Status is left alone, except that a member who is 'comped' only through a comp on this
+   * same product (and has no active subscription) becomes 'free'.
+   *
+   * @param {object} data
+   * @param {string} data.memberId
+   * @param {string} data.productId
+   * @param {Date | null} [data.expiresAt]
+   * @param {object} [options]
+   * @param {Knex.Transaction} [options.transacting]
+   */
+  async grantPurchasedProduct({ memberId, productId, expiresAt = null }, options = {}) {
+    if (!options.transacting) {
+      return this._Member.transaction((transacting) => {
+        return this.grantPurchasedProduct(
+          { memberId, productId, expiresAt },
+          { ...options, transacting },
+        );
+      });
+    }
+
+    const member = await this._Member.findOne(
+      { id: memberId },
+      {
+        ...options,
+        forUpdate: true,
+        withRelated: ['products', 'stripeSubscriptions'],
+        require: false,
+      },
+    );
+    if (!member) {
+      throw new NotFoundError({ message: tpl(messages.memberNotFound, { id: memberId }) });
+    }
+
+    // Each product keeps its own expiry_at, which Member.edit writes back unchanged
+    const current = member.related('products').toJSON();
+    const existing = current.find((product) => product.id === productId);
+
+    const statusData = {};
+    if (existing && member.get('status') === 'comped') {
+      const hasActiveSubscription = member
+        .related('stripeSubscriptions')
+        .models.some((sub) => this.isActiveSubscriptionStatus(sub.get('status')));
+
+      if (!hasActiveSubscription) {
+        // The purchase being granted may not be recorded yet, so count productId as purchased
+        const purchaseIds = (await this._getPurchaseSourcedProducts(memberId, options))
+          .map((product) => product.id)
+          .concat(productId);
+        const otherLinks = current.filter((product) => !purchaseIds.includes(product.id));
+        if (otherLinks.length === 0) {
+          statusData.status = 'free';
+        }
+      }
+    }
+
+    const toTime = (date) => (date ? new Date(date).getTime() : null);
+    const sameExpiry = existing && toTime(existing.expiry_at) === toTime(expiresAt);
+    if (sameExpiry && !statusData.status) {
+      return member;
+    }
+
+    const products = existing
+      ? current.map((product) =>
+          product.id === productId ? { ...product, expiry_at: expiresAt } : product,
+        )
+      : [...current, { id: productId, expiry_at: expiresAt }];
+
+    const updated = await this._Member.edit(
+      { products, ...statusData },
+      { ...options, id: memberId },
     );
 
+    if (!existing) {
+      await this._MemberProductEvent.add(
+        { member_id: memberId, product_id: productId, action: 'added' },
+        options,
+      );
+    }
+
+    if (statusData.status) {
+      await this._MemberStatusEvent.add(
+        { member_id: memberId, from_status: 'comped', to_status: statusData.status },
+        options,
+      );
+    }
+
+    return updated;
+  }
+
+  /**
+   * Unlinks a refunded purchase's product, unless another purchase or an active subscription
+   * still grants it. Call it after the purchase is marked refunded, in the same transaction.
+   * A 'comped' member left with no comp links becomes 'free'; 'gift' status is left alone, and a
+   * gift member keeps the link when it is also the gift's tier.
+   *
+   * @param {object} data
+   * @param {string} data.memberId
+   * @param {string} data.productId
+   * @param {object} [options]
+   * @param {Knex.Transaction} [options.transacting]
+   */
+  async revokePurchasedProduct({ memberId, productId }, options = {}) {
+    if (!options.transacting) {
+      return this._Member.transaction((transacting) => {
+        return this.revokePurchasedProduct({ memberId, productId }, { ...options, transacting });
+      });
+    }
+
+    const member = await this._Member.findOne(
+      { id: memberId },
+      {
+        ...options,
+        forUpdate: true,
+        require: false,
+        withRelated: [
+          'products',
+          'stripeSubscriptions',
+          'stripeSubscriptions.stripePrice',
+          'stripeSubscriptions.stripePrice.stripeProduct',
+        ],
+      },
+    );
+    if (!member) {
+      return null;
+    }
+
+    const purchaseIds = (await this._getPurchaseSourcedProducts(memberId, options)).map(
+      (product) => product.id,
+    );
     const activeSubscriptionProductIds = new Set(
       member
         .related('stripeSubscriptions')
@@ -2664,17 +2913,64 @@ module.exports = class MemberRepository {
         .filter(Boolean),
     );
 
-    const currentProducts = member.related('products').toJSON();
-    const filteredProducts = currentProducts.filter((product) =>
-      activeSubscriptionProductIds.has(product.id),
-    );
-
-    if (filteredProducts.length !== currentProducts.length) {
-      await this._Member.edit({ products: filteredProducts }, { id });
+    if (purchaseIds.includes(productId) || activeSubscriptionProductIds.has(productId)) {
+      // Still granted by another purchase or by a subscription
+      return member;
     }
 
-    return true;
+    const current = member.related('products').toJSON();
+    if (!current.some((product) => product.id === productId)) {
+      return member;
+    }
+    const remaining = current.filter((product) => product.id !== productId);
+
+    // A gift member always holds its gift link, and a different gift tier would still be among
+    // the non-purchase links. With none left, this product is the gift's own link: keep it until
+    // the gift lifecycle removes it, so the refund does not take away gift access.
+    if (
+      member.get('status') === 'gift' &&
+      remaining.filter((product) => !purchaseIds.includes(product.id)).length === 0
+    ) {
+      logging.warn(
+        {
+          event: { name: 'purchase.refund_kept_gift_link' },
+          memberId,
+          productId,
+        },
+        'Refunded purchase tier is also the member gift tier; keeping the link for the gift',
+      );
+      return member;
+    }
+
+    const statusData = {};
+    if (member.get('status') === 'comped' && activeSubscriptionProductIds.size === 0) {
+      const compLinks = remaining.filter((product) => !purchaseIds.includes(product.id));
+      if (compLinks.length === 0) {
+        statusData.status = 'free';
+      }
+    }
+
+    const updated = await this._Member.edit(
+      { products: remaining, ...statusData },
+      { ...options, id: memberId },
+    );
+
+    await this._MemberProductEvent.add(
+      { member_id: memberId, product_id: productId, action: 'removed' },
+      options,
+    );
+
+    if (statusData.status) {
+      await this._MemberStatusEvent.add(
+        { member_id: memberId, from_status: 'comped', to_status: statusData.status },
+        options,
+      );
+    }
+
+    return updated;
   }
+
+  // fork(salvare): end of one-time purchases -------------------------------------------
 
   /**
    * @param {string} memberId

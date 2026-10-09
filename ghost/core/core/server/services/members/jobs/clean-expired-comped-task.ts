@@ -62,12 +62,13 @@ async function cleanExpiredComped({
 
   const { deletedSubscriptionCount, updatedMemberCount, updatedMembers, now } =
     await db.knex.transaction(async (trx) => {
+      // we need to be careful about the type here. .format() is the only
+      // thing that works across SQLite and MySQL: an ISO cutoff compares
+      // lexically against SQLite's 'YYYY-MM-DD HH:mm:ss' text and its 'T'
+      // sorts above ' ', wrongly matching same-UTC-day expiries
+      const cutoff = moment.utc().startOf('day').format('YYYY-MM-DD HH:mm:ss'); // fork(salvare): hoisted
       const expiredCompedRows: ExpiredCompedRow[] = await trx('members_products')
-        // we need to be careful about the type here. .format() is the only
-        // thing that works across SQLite and MySQL: an ISO cutoff compares
-        // lexically against SQLite's 'YYYY-MM-DD HH:mm:ss' text and its 'T'
-        // sorts above ' ', wrongly matching same-UTC-day expiries
-        .where('expiry_at', '<', moment.utc().startOf('day').format('YYYY-MM-DD HH:mm:ss'))
+        .where('expiry_at', '<', cutoff)
         .select('*');
 
       if (!expiredCompedRows.length) {
@@ -96,7 +97,13 @@ async function cleanExpiredComped({
         .andWhere('status', 'comped')
         .forUpdate();
 
-      const deletedCount = await trx('members_products').whereIn('id', rowIds).del();
+      // fork(salvare): re-check the expiry at delete time. A one-time purchase of a comped tier
+      // resets that same row's expiry to null while this job waits on the member lock above; the
+      // DELETE's current read then skips it instead of removing the purchase link.
+      const deletedCount = await trx('members_products')
+        .whereIn('id', rowIds)
+        .andWhere('expiry_at', '<', cutoff)
+        .del();
 
       const updateMemberIds = compedMembers.map((d) => d.id);
       const updatedAt = new Date();

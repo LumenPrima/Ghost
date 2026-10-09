@@ -22,6 +22,8 @@ const emailSuppressionList = require('../email-suppression-list');
 const commentsService = require('../comments');
 const emailAddressService = require('../email-address');
 const giftService = require('../gifts');
+const purchaseService = require('../purchases'); // fork(salvare)
+const db = require('../../data/db'); // fork(salvare)
 const metafieldsService = require('../members-metafields');
 const { t } = require('../i18n');
 const sentry = require('../../../shared/sentry');
@@ -275,6 +277,17 @@ function createApiInstance(config) {
     // members API is built in initServices, so this is always the live instance.
     metafieldValues: metafieldsService.values,
     metafieldDefinitions: metafieldsService.definitions,
+    // fork(salvare): one-time purchases. purchase-links is required lazily so load order
+    // doesn't matter; RouterController reads purchaseService.service lazily, like gifts.
+    purchaseLinks: {
+      getPurchaseSourcedProducts: (memberId, options) =>
+        require('../purchases/purchase-links').getPurchaseSourcedProducts(
+          db.knex,
+          memberId,
+          options,
+        ),
+    },
+    purchaseService,
   });
 
   return membersApiInstance;

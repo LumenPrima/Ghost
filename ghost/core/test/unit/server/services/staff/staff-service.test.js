@@ -1450,5 +1450,91 @@ describe('StaffService', function () {
         );
       });
     });
+
+    // fork(salvare): one-time tier purchase staff email
+    describe('notifyPurchaseReceived', function () {
+      const purchase = {
+        name: 'Alice',
+        email: 'alice@example.com',
+        memberId: null,
+        amount: 4900,
+        currency: 'usd',
+        tierName: 'Breaking Free',
+      };
+
+      it('sends to paid-started alert users with the purchase subject', async function () {
+        await service.emails.notifyPurchaseReceived(purchase);
+
+        sinon.assert.calledOnceWithExactly(getEmailAlertUsersStub, 'paid-started');
+        sinon.assert.calledOnce(mailStub);
+        sinon.assert.calledWith(
+          mailStub,
+          sinon.match({
+            to: 'owner@ghost.org',
+            subject: '💳 Purchase: Breaking Free — $49.00 from Alice',
+          }),
+        );
+      });
+
+      it('renders the purchase template with tier, amount and purchaser in HTML and text', async function () {
+        await service.emails.notifyPurchaseReceived({ ...purchase, amount: 1500, currency: 'eur' });
+
+        sinon.assert.calledOnce(mailStub);
+        const { html, text } = mailStub.firstCall.args[0];
+        assert.match(html, /A tier was&nbsp;purchased/);
+        assert.match(html, /Breaking Free/);
+        assert.match(html, /€15\.00/);
+        assert.match(html, /Alice/);
+        assert.match(text, /From: Alice/);
+        assert.match(text, /Tier: Breaking Free/);
+        assert.match(text, /Amount received: €15\.00/);
+        assert.doesNotMatch(html, /duplicate/i);
+        assert.doesNotMatch(text, /duplicate/i);
+      });
+
+      it('falls back to email when name is null', async function () {
+        await service.emails.notifyPurchaseReceived({ ...purchase, name: null });
+
+        sinon.assert.calledOnce(mailStub);
+        sinon.assert.calledWith(
+          mailStub,
+          sinon.match.has('subject', sinon.match('from alice@example.com')),
+        );
+        sinon.assert.calledWith(
+          mailStub,
+          sinon.match.has('text', sinon.match('From: alice@example.com')),
+        );
+      });
+
+      it('links to the member only when memberId is set', async function () {
+        await service.emails.notifyPurchaseReceived(purchase);
+        assert.doesNotMatch(mailStub.firstCall.args[0].html, /#\/members\//);
+
+        mailStub.resetHistory();
+        await service.emails.notifyPurchaseReceived({ ...purchase, memberId: 'abc' });
+        assert.match(
+          mailStub.firstCall.args[0].html,
+          /https:\/\/admin\.ghost\.example\/#\/members\/abc/,
+        );
+      });
+
+      it('flags a possible duplicate purchase in subject, HTML and text', async function () {
+        await service.emails.notifyPurchaseReceived({ ...purchase, possibleDuplicate: true });
+
+        sinon.assert.calledOnce(mailStub);
+        const { subject, html, text } = mailStub.firstCall.args[0];
+        assert.equal(subject, '⚠️ Possible duplicate purchase: Breaking Free — $49.00 from Alice');
+        assert.match(html, /Possible duplicate purchase — consider a refund\./);
+        assert.match(text, /POSSIBLE DUPLICATE PURCHASE — CONSIDER A REFUND/);
+      });
+
+      it('sends nothing when no staff user has paid-started alerts on', async function () {
+        getEmailAlertUsersStub.resolves([]);
+
+        await service.emails.notifyPurchaseReceived(purchase);
+
+        sinon.assert.notCalled(mailStub);
+      });
+    });
   });
 });

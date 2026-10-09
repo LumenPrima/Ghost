@@ -57,6 +57,20 @@ const invalidInputs = [
   { yearlyPrice: 2000, type: 'free', trialDays: null, monthlyPrice: null, currency: null },
   { yearlyPrice: -20 },
   { yearlyPrice: 10000000000 },
+  // fork(salvare): one-time price
+  { oneTimePrice: 0 },
+  { oneTimePrice: -100 },
+  { oneTimePrice: 99.5 },
+  { oneTimePrice: '9900' },
+  { oneTimePrice: 4294967296 },
+  {
+    oneTimePrice: 9900,
+    type: 'free',
+    trialDays: null,
+    currency: null,
+    monthlyPrice: null,
+    yearlyPrice: null,
+  },
   { createdAt: 'Today' },
   { updatedAt: 'Tomorrow' },
 ];
@@ -71,6 +85,19 @@ const validInputs = [
   { status: undefined },
   { type: undefined },
   { visibility: undefined },
+  // fork(salvare): one-time price
+  { oneTimePrice: 9900 },
+  { oneTimePrice: null },
+  { oneTimePrice: undefined },
+  { oneTimePrice: 4294967295 },
+  {
+    oneTimePrice: null,
+    type: 'free',
+    currency: null,
+    monthlyPrice: null,
+    yearlyPrice: null,
+    trialDays: null,
+  },
 ];
 
 describe('Tier', function () {
@@ -119,6 +146,7 @@ describe('Tier', function () {
         'currency',
         'monthlyPrice',
         'yearlyPrice',
+        'oneTimePrice', // fork(salvare)
         'createdAt',
         'updatedAt',
         'benefits',
@@ -272,6 +300,85 @@ describe('Tier', function () {
           monthlyPrice: 1000,
           yearlyPrice: 10000,
         });
+      });
+    });
+
+    // fork(salvare): one-time price
+    describe('oneTimePrice', function () {
+      it('Defaults to null', async function () {
+        const tier = await Tier.create(validInput);
+
+        assert.equal(tier.oneTimePrice, null);
+        assert.equal(tier.toJSON().oneTimePrice, null);
+      });
+
+      it('Is set from create input and included in toJSON', async function () {
+        const tier = await Tier.create({ ...validInput, oneTimePrice: 9900 });
+
+        assert.equal(tier.oneTimePrice, 9900);
+        assert.equal(tier.toJSON().oneTimePrice, 9900);
+      });
+
+      it('Survives a round trip through Tier.create with an existing Tier', async function () {
+        const tier = await Tier.create({ ...validInput, oneTimePrice: 9900 });
+        const copy = await Tier.create(tier);
+
+        assert.equal(copy.oneTimePrice, 9900);
+      });
+
+      it('Can be set, changed and cleared without adding events', async function () {
+        const tier = await Tier.create({ ...validInput, id: new ObjectID() });
+
+        tier.oneTimePrice = 9900;
+        assert.equal(tier.oneTimePrice, 9900);
+
+        tier.oneTimePrice = 4294967295;
+        assert.equal(tier.oneTimePrice, 4294967295);
+
+        tier.oneTimePrice = null;
+        assert.equal(tier.oneTimePrice, null);
+
+        assert.equal(tier.events.length, 0);
+      });
+
+      it('Rejects invalid values in the setter', async function () {
+        const tier = await Tier.create({ ...validInput, oneTimePrice: 9900 });
+
+        for (const value of [0, -1, 1.5, '9900', 4294967296, Number.NaN]) {
+          await assertError(
+            () => {
+              tier.oneTimePrice = value;
+            },
+            (err) => {
+              assert.equal(err.errorType, 'ValidationError');
+            },
+          );
+        }
+
+        assert.equal(tier.oneTimePrice, 9900);
+      });
+
+      it('Cannot be set on a free tier', async function () {
+        const tier = await Tier.create({
+          ...validInput,
+          type: 'free',
+          currency: null,
+          monthlyPrice: null,
+          yearlyPrice: null,
+          trialDays: null,
+        });
+
+        await assertError(
+          () => {
+            tier.oneTimePrice = 9900;
+          },
+          (err) => {
+            assert.equal(err.message, 'Free Tiers cannot have a one-time price');
+          },
+        );
+
+        tier.oneTimePrice = null;
+        assert.equal(tier.oneTimePrice, null);
       });
     });
 
