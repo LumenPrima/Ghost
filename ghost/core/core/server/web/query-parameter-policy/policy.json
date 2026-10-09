@@ -40,7 +40,13 @@
     { "name": "admin", "reason": "Admin toolbar activation" },
     { "name": "admin_toolbar", "reason": "Admin toolbar suppression" },
     { "name": "gift", "reason": "Gift-link unlock token on canonical post URLs" },
-    { "name": "step", "reason": "Automations analytics" }
+    { "name": "step", "reason": "Automations analytics" },
+    { "name": "post_id", "reason": "fork(salvare): members lesson progress API post lookup" },
+    {
+      "name": "post",
+      "reason": "fork(salvare): members lesson progress API post lookup (alias of post_id)"
+    },
+    { "name": "tag", "reason": "fork(salvare): members lesson progress API course (tag) lookup" }
   ],
   "contentApi": [
     { "name": "absolute_urls", "reason": "Converts relative URLs to absolute URLs" },

@@ -3,6 +3,7 @@
 // Fetches data from the API
 const { config, api, prepareContextResource } = require('../services/proxy');
 const { hbs } = require('../services/handlebars');
+const { apiMemberContext } = require('../utils/member-api-context'); // fork(salvare)
 
 const logging = require('@tryghost/logging');
 const errors = require('@tryghost/errors');
@@ -118,7 +119,7 @@ module.exports = async function collection(slug, options) {
 
   // Parse the options we're going to pass to the API
   apiOptions = parseOptions(apiOptions);
-  apiOptions.context = { member: data.member };
+  apiOptions.context = { member: apiMemberContext(data) }; // fork(salvare): tier ids/slugs and drip access starts
   apiOptions.collection = slug;
 
   try {

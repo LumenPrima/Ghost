@@ -861,6 +861,33 @@ module.exports = {
     updated_at: { type: 'dateTime', nullable: true },
     '@@INDEXES@@': [['member_id', 'product_id']],
   },
+  // fork(salvare): per-member lesson progress (plan §5.5). One row per (member, post).
+  members_post_progress: {
+    id: { type: 'string', maxlength: 24, nullable: false, primary: true },
+    member_id: {
+      type: 'string',
+      maxlength: 24,
+      nullable: false,
+      references: 'members.id',
+      cascadeDelete: true,
+    },
+    post_id: {
+      type: 'string',
+      maxlength: 24,
+      nullable: false,
+      references: 'posts.id',
+      cascadeDelete: true,
+    },
+    status: {
+      type: 'string',
+      maxlength: 50,
+      nullable: false,
+      validations: { isIn: [['started', 'completed']] },
+    },
+    created_at: { type: 'dateTime', nullable: false },
+    updated_at: { type: 'dateTime', nullable: true },
+    '@@UNIQUE_CONSTRAINTS@@': [['member_id', 'post_id']],
+  },
   posts_products: {
     id: { type: 'string', maxlength: 24, nullable: false, primary: true },
     post_id: {

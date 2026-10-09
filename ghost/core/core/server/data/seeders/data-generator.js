@@ -119,6 +119,14 @@ class DataGenerator {
       tables.unshift('members_current_subscription');
     }
 
+    // fork(salvare): same reason. These fork tables have no importer and reference
+    // members, posts and products, which are truncated with FK checks off.
+    for (const forkTable of ['members_post_progress', 'members_purchases']) {
+      if (await transaction.schema.hasTable(forkTable)) {
+        tables.unshift(forkTable);
+      }
+    }
+
     // Clear data from any tables that are being imported
     for (const table of tables) {
       this.logger.debug(`Clearing table ${table}`);

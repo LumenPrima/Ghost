@@ -409,4 +409,157 @@ describe('Unit: endpoints/utils/serializers/output/utils/post-gating', function 
       );
     });
   });
+
+  // fork(salvare): drip
+  describe('fork(salvare): drip', function () {
+    const drip = require('../../../../../../../../core/server/services/drip');
+    const configUtils = require('../../../../../../../utils/config-utils');
+    const settingsCache = require('../../../../../../../../core/shared/settings-cache');
+    const { EventEmitter } = require('node:events');
+
+    const COURSE = 'course_tier_000000000000';
+    const DAY = 24 * 60 * 60 * 1000;
+    const recent = new Date(Date.now() - DAY).toISOString();
+    const longAgo = new Date(Date.now() - 30 * DAY).toISOString();
+
+    function member(addedAt) {
+      return {
+        id: 'member_1',
+        uuid: 'uuid-1',
+        status: 'free',
+        created_at: longAgo,
+        products: [{ id: COURSE, slug: 'course' }],
+        productEvents: [{ product_id: COURSE, action: 'added', created_at: addedAt }],
+        subscriptions: [],
+      };
+    }
+
+    function lesson(overrides = {}) {
+      return {
+        id: 'lesson_1',
+        visibility: 'tiers',
+        tiers: [{ id: COURSE, slug: 'course', type: 'paid' }],
+        plaintext: 'secret lesson',
+        html: '<p>secret lesson</p>',
+        ...overrides,
+      };
+    }
+
+    function frameFor(contextMember, options = {}) {
+      return { options, original: { context: { member: contextMember } } };
+    }
+
+    beforeEach(async function () {
+      drip.reset();
+      sinon.stub(settingsCache, 'get').withArgs('timezone').returns('Etc/UTC');
+      configUtils.set('salvare:drip:mode', 'enforce');
+      await drip.init({
+        loadRows: async () => [{ post_id: 'lesson_1', name: '#drip-3' }],
+        events: new EventEmitter(),
+        logger: { error: sinon.stub(), warn: sinon.stub() },
+      });
+    });
+
+    afterEach(async function () {
+      drip.reset();
+      await configUtils.restore();
+    });
+
+    it('withholds a drip-locked lesson: html emptied, access false, unlock_at set', function () {
+      const attrs = lesson();
+
+      gating.forPost(attrs, frameFor(member(recent)));
+
+      assert.equal(attrs.html, '');
+      assert.equal(attrs.plaintext, '');
+      assert.equal(attrs.access, false);
+      const startDay = new Date(recent);
+      startDay.setUTCHours(0, 0, 0, 0);
+      assert.equal(attrs.unlock_at, new Date(startDay.getTime() + 3 * DAY).toISOString());
+    });
+
+    it('keeps the part before <!--members-only--> on a locked lesson', function () {
+      const attrs = lesson({ html: '<p>Intro</p><!--members-only--><p>secret</p>' });
+
+      gating.forPost(attrs, frameFor(member(recent)));
+
+      assert.equal(attrs.html, '<p>Intro</p>');
+      assert.equal(attrs.plaintext, 'Intro');
+      assert.equal(attrs.access, false);
+    });
+
+    it('keeps the html of an open lesson and adds no unlock_at', function () {
+      const attrs = lesson();
+
+      gating.forPost(attrs, frameFor(member(longAgo)));
+
+      assert.equal(attrs.html, '<p>secret lesson</p>');
+      assert.equal(attrs.access, true);
+      assert.equal('unlock_at' in attrs, false);
+    });
+
+    it('shows unlock_at without withholding in advise mode', function () {
+      configUtils.set('salvare:drip:mode', 'advise');
+      const attrs = lesson();
+
+      gating.forPost(attrs, frameFor(member(recent)));
+
+      assert.equal(attrs.html, '<p>secret lesson</p>');
+      assert.equal(attrs.access, true);
+      assert.equal(typeof attrs.unlock_at, 'string');
+    });
+
+    it('adds no unlock_at when fields does not list it, but still withholds', function () {
+      const attrs = lesson();
+
+      gating.forPost(attrs, frameFor(member(recent), { columns: ['id', 'html', 'access'] }));
+
+      assert.equal(attrs.html, '');
+      assert.equal(attrs.access, false);
+      assert.equal('unlock_at' in attrs, false);
+    });
+
+    it('adds unlock_at when fields lists it', function () {
+      const attrs = lesson();
+
+      gating.forPost(attrs, frameFor(member(recent), { columns: ['id', 'access', 'unlock_at'] }));
+
+      assert.equal(attrs.access, false);
+      assert.equal(typeof attrs.unlock_at, 'string');
+    });
+
+    it('leaves a member without the tier locked by tiers alone, with no unlock_at', function () {
+      const attrs = lesson();
+      const outsider = { ...member(recent), products: [] };
+
+      gating.forPost(attrs, frameFor(outsider));
+
+      assert.equal(attrs.access, false);
+      assert.equal('unlock_at' in attrs, false);
+    });
+
+    it('opens the lesson to a staff preview with unlock_at', function () {
+      const attrs = lesson();
+      const frame = {
+        ...frameFor({ status: 'paid', products: [{ id: COURSE, slug: 'course' }] }),
+        isPreview: true,
+      };
+
+      gating.forPost(attrs, frame);
+
+      assert.equal(attrs.html, '<p>secret lesson</p>');
+      assert.equal(attrs.access, true);
+      assert.equal(typeof attrs.unlock_at, 'string');
+    });
+
+    it('does nothing for posts without a drip tag', function () {
+      const attrs = lesson({ id: 'other_post' });
+
+      gating.forPost(attrs, frameFor(member(recent)));
+
+      assert.equal(attrs.html, '<p>secret lesson</p>');
+      assert.equal(attrs.access, true);
+      assert.equal('unlock_at' in attrs, false);
+    });
+  });
 });

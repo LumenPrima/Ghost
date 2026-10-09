@@ -70,6 +70,7 @@ describe('Exporter', function () {
       'members_newsletters',
       'members_paid_subscription_events',
       'members_payment_events',
+      'members_post_progress', // fork(salvare)
       'members_product_events',
       'members_products',
       'members_purchases', // fork(salvare)
@@ -156,6 +157,7 @@ describe('Exporter', function () {
       'gift_deliveries',
       'gifts',
       'members_purchases', // fork(salvare)
+      'members_post_progress', // fork(salvare)
       'gift_links',
       'post_gift_links',
     ];

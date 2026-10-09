@@ -96,4 +96,53 @@ describe('{{#collection}} helper', function () {
       }
     });
   });
+
+  // fork(salvare): theme contract §5 and drip
+  describe('auth', function () {
+    let browseStub;
+
+    beforeEach(function () {
+      browseStub = sinon.stub().resolves({ posts: [] });
+      sinon.stub(api, 'postsPublic').get(() => {
+        return {
+          browse: browseStub,
+        };
+      });
+    });
+
+    it('passes @member unchanged when there is no session member', async function () {
+      const member = { uuid: 'test' };
+      locals = { root: { _locals: {} }, member };
+
+      await collection.call({}, 'featured', { hash: {}, data: locals, fn: fn, inverse: inverse });
+
+      assert.equal(browseStub.firstCall.args[0].context.member, member);
+    });
+
+    it("adds the session member's tier ids/slugs and access starts to the member context", async function () {
+      const member = { uuid: 'test' };
+      const accessStarts = {
+        member: '2026-01-01T00:00:00.000Z',
+        products: { 'product-1': '2026-02-01T00:00:00.000Z' },
+      };
+      const session = {
+        uuid: 'test',
+        email: 'member@example.com',
+        unsubscribe_url: 'https://example.com/unsubscribe/?key=secret',
+        products: [{ id: 'product-1', slug: 'anxiety', name: 'Anxiety', expiry_at: null }],
+        // drip uses access starts already on the member as is (Phase 3 amendment B1)
+        access_starts: accessStarts,
+      };
+      locals = { root: { _locals: { member: session } }, member };
+
+      await collection.call({}, 'featured', { hash: {}, data: locals, fn: fn, inverse: inverse });
+
+      assert.deepEqual(browseStub.firstCall.args[0].context.member, {
+        uuid: 'test',
+        products: [{ id: 'product-1', slug: 'anxiety' }],
+        access_starts: accessStarts,
+      });
+      assert.deepEqual(member, { uuid: 'test' });
+    });
+  });
 });

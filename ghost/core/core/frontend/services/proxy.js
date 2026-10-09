@@ -94,6 +94,12 @@ module.exports = {
     return require('../../server/services/members');
   },
 
+  // fork(salvare): drip access starts for the theme helpers' API member context
+  // (utils/member-api-context.ts). Lazy, like `members`.
+  computeDripAccessStarts(member) {
+    return require('../../server/services/drip').computeAccessStarts(member);
+  },
+
   // TODO: Expose less of the API to make this safe
   api: require('../../server/api').endpoints,
 

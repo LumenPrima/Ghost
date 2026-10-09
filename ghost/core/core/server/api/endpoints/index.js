@@ -324,6 +324,11 @@ module.exports = {
     return apiFramework.pipeline(require('./gifts-members'), localUtils, 'members');
   },
 
+  // fork(salvare): lesson progress
+  get progressMembers() {
+    return apiFramework.pipeline(require('./progress-members'), localUtils, 'members');
+  },
+
   get giftLinks() {
     return apiFramework.pipeline(require('./gift-links'), localUtils);
   },

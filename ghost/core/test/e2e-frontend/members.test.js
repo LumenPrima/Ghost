@@ -998,6 +998,7 @@ describe('Front-end members behavior', function () {
             'subscriptions',
             'paid',
             'status',
+            'tiers', // fork(salvare): @member.tiers
           ]),
         );
 

@@ -1,5 +1,6 @@
 const membersService = require('../../../../../../services/members');
 const htmlToPlaintext = require('@tryghost/html-to-plaintext');
+const drip = require('../../../../../../services/drip'); // fork(salvare)
 
 const { PERMIT_ACCESS } = membersService.contentGating;
 
@@ -100,10 +101,11 @@ const forPost = (attrs, frame) => {
     attrs.access = true;
   }
 
-  const memberHasAccess = membersService.contentGating.checkPostAccess(
+  let memberHasAccess = membersService.contentGating.checkPostAccess(
     attrs,
     frame.original.context.member,
   );
+  memberHasAccess = drip.applyToPost(attrs, frame, memberHasAccess); // fork(salvare): drip-locked = withheld
 
   if (!memberHasAccess) {
     const paywallIndex = (attrs.html || '').indexOf('<!--members-only-->');

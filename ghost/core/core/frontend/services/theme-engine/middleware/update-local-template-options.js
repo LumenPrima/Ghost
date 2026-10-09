@@ -40,6 +40,15 @@ function updateLocalTemplateOptions(req, res, next) {
           }),
         paid: req.member.status !== 'free',
         status: req.member.status,
+        // fork(salvare): held tiers; expiry_at null = no expiry (purchase or subscription-held).
+        // The server refuses re-purchase only for an active purchase, so hide Buy only for entries
+        // with no expiry. Not `products`: gscan rejects {{@member.products}} (GS090).
+        tiers: (req.member.products || []).map((p) => ({
+          id: p.id,
+          slug: p.slug,
+          name: p.name,
+          expiry_at: p.expiry_at ? new Date(p.expiry_at).toISOString() : null,
+        })),
       }
     : null;
 

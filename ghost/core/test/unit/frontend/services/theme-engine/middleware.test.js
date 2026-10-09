@@ -323,4 +323,77 @@ describe('Themes middleware', function () {
       assert.deepEqual(data.custom, {});
     });
   });
+
+  // fork(salvare): @member.tiers
+  describe('@member.tiers', function () {
+    let memberApp;
+    let reqMember;
+
+    beforeEach(function () {
+      reqMember = null;
+      memberApp = express();
+      memberApp.use((req, _res, next) => {
+        req.member = reqMember;
+        next();
+      });
+      memberApp.use(middleware);
+      memberApp.get('/', (_req, res) => {
+        res.json({ ok: true });
+      });
+    });
+
+    it("lists the member's products as {id, slug, name, expiry_at}", async function () {
+      reqMember = {
+        uuid: 'member-uuid',
+        email: 'member@example.com',
+        name: 'Jamie Larson',
+        status: 'free',
+        subscriptions: [],
+        products: [
+          {
+            id: 'product-1',
+            slug: 'anxiety',
+            name: 'Anxiety',
+            expiry_at: null,
+            monthly_price: 500,
+          },
+          { id: 'product-2', slug: 'breaking-free', name: 'Breaking Free' },
+          {
+            id: 'product-3',
+            slug: 'gifted',
+            name: 'Gifted',
+            expiry_at: new Date('2026-11-06T00:00:00.000Z'),
+          },
+        ],
+      };
+
+      await request(memberApp).get('/').expect(200);
+
+      sinon.assert.calledOnce(hbsUpdateLocalTemplateOptionsStub);
+      const data = hbsUpdateLocalTemplateOptionsStub.firstCall.args[1].data;
+
+      assert.deepEqual(data.member.tiers, [
+        { id: 'product-1', slug: 'anxiety', name: 'Anxiety', expiry_at: null },
+        { id: 'product-2', slug: 'breaking-free', name: 'Breaking Free', expiry_at: null },
+        { id: 'product-3', slug: 'gifted', name: 'Gifted', expiry_at: '2026-11-06T00:00:00.000Z' },
+      ]);
+      assert.ok(!('products' in data.member), '@member.products must not exist (gscan GS090)');
+    });
+
+    it('is an empty array when the member has no products', async function () {
+      reqMember = { uuid: 'member-uuid', email: 'member@example.com', status: 'free' };
+
+      await request(memberApp).get('/').expect(200);
+
+      const data = hbsUpdateLocalTemplateOptionsStub.firstCall.args[1].data;
+      assert.deepEqual(data.member.tiers, []);
+    });
+
+    it('leaves @member null when signed out', async function () {
+      await request(memberApp).get('/').expect(200);
+
+      const data = hbsUpdateLocalTemplateOptionsStub.firstCall.args[1].data;
+      assert.equal(data.member, null);
+    });
+  });
 });

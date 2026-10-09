@@ -4,6 +4,7 @@
 const { config, api, prepareContextResource } = require('../services/proxy');
 const { hbs, SafeString } = require('../services/handlebars');
 const { applyLimitCap } = require('../../shared/max-limit-cap');
+const { apiMemberContext } = require('../utils/member-api-context'); // fork(salvare)
 
 const logging = require('@tryghost/logging');
 const errors = require('@tryghost/errors');
@@ -429,7 +430,7 @@ module.exports = async function get(resource, options) {
 
   // Parse the options we're going to pass to the API
   apiOptions = parseOptions(ghostGlobals, this, apiOptions);
-  apiOptions.context = { member: data.member };
+  apiOptions.context = { member: apiMemberContext(data) }; // fork(salvare): tier ids/slugs and drip access starts
 
   // {{url}} on the results reads the serializer-attached url, so a narrowed
   // fields list must still include it

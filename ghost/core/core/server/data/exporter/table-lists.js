@@ -67,6 +67,7 @@ const BACKUP_TABLES = [
   'gift_deliveries',
   'gifts',
   'members_purchases', // fork(salvare)
+  'members_post_progress', // fork(salvare)
   'gift_links',
   'post_gift_links',
   'automations',

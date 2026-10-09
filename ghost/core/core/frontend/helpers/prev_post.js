@@ -5,6 +5,7 @@
 const { api } = require('../services/proxy');
 const { hbs } = require('../services/handlebars');
 const { checks } = require('../services/data');
+const { apiMemberContext } = require('../utils/member-api-context'); // fork(salvare)
 
 const logging = require('@tryghost/logging');
 const tpl = require('@tryghost/tpl');
@@ -35,7 +36,7 @@ const buildApiOptions = function buildApiOptions(options, post) {
     // This line deliberately uses double quotes because GQL cannot handle either double quotes
     // or escaped singles, see TryGhost/GQL#34
     filter: 'slug:-' + slug + '+published_at:' + op + "'" + publishedAt + "'",
-    context: { member: options.data.member },
+    context: { member: apiMemberContext(options.data) }, // fork(salvare): tier ids/slugs and drip access starts
   };
 
   if (get(options, 'hash.in')) {

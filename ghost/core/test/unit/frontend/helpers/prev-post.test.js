@@ -1,3 +1,4 @@
+const assert = require('node:assert/strict'); // fork(salvare)
 const errors = require('@tryghost/errors');
 const sinon = require('sinon');
 const markdownToLexical = require('../../../utils/fixtures/data-generator').markdownToLexical;
@@ -564,6 +565,50 @@ describe('{{prev_post}} helper', function () {
           context: sinon.match({ member }),
         }),
       );
+    });
+
+    // fork(salvare): theme contract §5 and drip
+    it("adds the session member's tier ids/slugs and access starts to the member context", async function () {
+      const accessStarts = {
+        member: '2026-01-01T00:00:00.000Z',
+        products: { 'product-1': '2026-02-01T00:00:00.000Z' },
+      };
+      const session = {
+        uuid: 'test',
+        email: 'member@example.com',
+        unsubscribe_url: 'https://example.com/unsubscribe/?key=secret',
+        products: [{ id: 'product-1', slug: 'anxiety', name: 'Anxiety', expiry_at: null }],
+        // drip uses access starts already on the member as is (Phase 3 amendment B1)
+        access_starts: accessStarts,
+      };
+      locals.root._locals.member = session;
+      const optionsData = {
+        name: 'prev_post',
+        data: locals,
+        fn: sinon.spy(),
+        inverse: sinon.spy(),
+      };
+
+      await prev_post.call(
+        {
+          html: 'content',
+          status: 'published',
+          lexical: markdownToLexical('ff'),
+          title: 'post2',
+          slug: 'current',
+          published_at: new Date(0),
+          url: '/current/',
+        },
+        optionsData,
+      );
+
+      sinon.assert.calledOnce(browsePostsStub);
+      assert.deepEqual(browsePostsStub.firstCall.args[0].context.member, {
+        uuid: 'test',
+        products: [{ id: 'product-1', slug: 'anxiety' }],
+        access_starts: accessStarts,
+      });
+      assert.deepEqual(member, { uuid: 'test' });
     });
   });
 });

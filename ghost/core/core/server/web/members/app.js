@@ -164,6 +164,8 @@ module.exports = function setupMembersApp() {
     http(api.giftsMembers.redeem),
   );
 
+  membersApp.use('/api/progress', require('./progress/routes')()); // fork(salvare): lesson progress (plan §5.5)
+
   // Announcement
   membersApp.use('/api/announcement', middleware.loadMemberSession, announcementRouter());
 

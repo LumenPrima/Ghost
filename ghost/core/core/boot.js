@@ -358,6 +358,8 @@ async function initServices({ ghostServer, config, prometheusClient, jobsService
   const donationService = require('./server/services/donations');
   const giftService = require('./server/services/gifts');
   const purchaseService = require('./server/services/purchases'); // fork(salvare)
+  const dripService = require('./server/services/drip'); // fork(salvare)
+  const progressService = require('./server/services/progress'); // fork(salvare)
   const machinePaymentsService = require('./server/services/machine-payments');
   const recommendationsService = require('./server/services/recommendations');
   const emailAddressService = require('./server/services/email-address');
@@ -389,6 +391,8 @@ async function initServices({ ghostServer, config, prometheusClient, jobsService
     internalKeys,
   });
   purchaseService.init(); // fork(salvare)
+  await dripService.init(); // fork(salvare): loads the drip index; refuses to boot if unsafe caches are on in enforce mode
+  progressService.init(); // fork(salvare)
   const giftDeliveryService = giftService.deliveryService;
   assert(giftDeliveryService, 'Gift delivery service should be initialized');
   if (ghostServer) {
