@@ -20,11 +20,12 @@ describe('Unit | Utility | event-type-utils', function () {
     it('should toggle payment_event together with donation_event and gift_purchase_event when toggling payment_event', function () {
         const newExcludedEvents = toggleEventType('payment_event', []);
 
-        expect(newExcludedEvents).to.equal('payment_event,donation_event,gift_purchase_event');
+        // fork(salvare): the one-time purchase events join the payment group
+        expect(newExcludedEvents).to.equal('payment_event,donation_event,gift_purchase_event,purchase_event,purchase_refunded_event,purchase_revoked_event');
     });
 
     it('should toggle payment_event group off when toggling payment_event off', function () {
-        const newExcludedEvents = toggleEventType('payment_event', ['payment_event', 'donation_event', 'gift_purchase_event']);
+        const newExcludedEvents = toggleEventType('payment_event', ['payment_event', 'donation_event', 'gift_purchase_event', 'purchase_event', 'purchase_refunded_event', 'purchase_revoked_event']); // fork(salvare)
 
         expect(newExcludedEvents).to.equal('');
     });
@@ -50,7 +51,14 @@ describe('Unit | Utility | event-type-utils', function () {
     it('should preserve previously-excluded subscription group when toggling payment_event', function () {
         const newExcludedEvents = toggleEventType('payment_event', ['subscription_event', 'gift_redemption_event', 'gift_ended_event']);
 
-        expect(newExcludedEvents).to.equal('subscription_event,gift_redemption_event,gift_ended_event,payment_event,donation_event,gift_purchase_event');
+        expect(newExcludedEvents).to.equal('subscription_event,gift_redemption_event,gift_ended_event,payment_event,donation_event,gift_purchase_event,purchase_event,purchase_refunded_event,purchase_revoked_event'); // fork(salvare)
+    });
+
+    // fork(salvare)
+    it('should remove every purchase event when toggling payment_event back on', function () {
+        const newExcludedEvents = toggleEventType('payment_event', 'email_opened_event,payment_event,donation_event,gift_purchase_event,purchase_event,purchase_refunded_event,purchase_revoked_event');
+
+        expect(newExcludedEvents).to.equal('email_opened_event');
     });
 
     it('should accept a comma-separated string for currentExcludedEvents', function () {

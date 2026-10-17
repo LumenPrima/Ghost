@@ -737,4 +737,208 @@ describe('EventRepository', function () {
       assert.equal(event.data.member_id, 'member-xyz');
     });
   });
+
+  // fork(salvare): one-time purchase rows in the activity feed
+  describe('purchase events', function () {
+    const OTHER_ACTIONS = [
+      'getCommentEvents',
+      'getClickEvents',
+      'getAggregatedClickEvents',
+      'getSignupEvents',
+      'getSubscriptionEvents',
+      'getDonationEvents',
+      'getNewsletterSubscriptionEvents',
+      'getLoginEvents',
+      'getPaymentEvents',
+      'getEmailChangeEvent',
+      'getGiftPurchaseEvents',
+      'getGiftRedemptionEvents',
+      'getGiftEndedEvents',
+      'getEmailSpamComplaintEvents',
+      'getFeedbackEvents',
+    ];
+
+    const emptyPage = () => ({ data: [], meta: { pagination: { total: 0 } } });
+
+    function createRepository(purchaseEvents) {
+      const repository = new EventRepository({
+        EmailRecipient: null,
+        MemberSubscribeEvent: null,
+        MemberPaymentEvent: null,
+        MemberStatusEvent: null,
+        MemberLoginEvent: null,
+        MemberPaidSubscriptionEvent: null,
+        labsService: null,
+        purchaseEvents,
+      });
+      for (const action of OTHER_ACTIONS) {
+        sinon.stub(repository, action).resolves(emptyPage());
+      }
+      return repository;
+    }
+
+    function purchaseRow(type, id, createdAt) {
+      return {
+        type,
+        data: {
+          id,
+          member: null,
+          member_id: 'member-1',
+          tier_id: 'tier-1',
+          tier_name: 'Breaking Free',
+          amount: 9900,
+          currency: 'usd',
+          source: 'stripe',
+          created_at: new Date(createdAt),
+        },
+      };
+    }
+
+    afterEach(function () {
+      sinon.restore();
+    });
+
+    it('queries the three purchase lists, passing the options and member filter through', async function () {
+      const browse = sinon.stub().resolves(emptyPage());
+      const repository = createRepository({ browse });
+
+      await repository.getEventTimeline({ filter: "data.member_id:'member-1'", limit: 5 });
+
+      assert.deepEqual(
+        browse.getCalls().map((call) => call.args[0]),
+        ['purchase_event', 'purchase_refunded_event', 'purchase_revoked_event'],
+      );
+      for (const call of browse.getCalls()) {
+        assert.equal(call.args[1].limit, 5);
+        assert.equal(call.args[1].order, 'created_at desc, id desc');
+        assert.deepEqual(call.args[2], { 'data.member_id': 'member-1' });
+      }
+    });
+
+    it('passes an id cursor filter through unchanged', async function () {
+      const browse = sinon.stub().resolves(emptyPage());
+      const repository = createRepository({ browse });
+
+      await repository.getEventTimeline({
+        filter: "id:<'5f8e3c1a2b4d6e7f8a9b0c1d'+data.created_at:<='2026-10-01 00:00:00'",
+      });
+
+      sinon.assert.called(browse);
+      for (const call of browse.getCalls()) {
+        assert.deepEqual(call.args[2], {
+          $and: [
+            { id: { $lt: '5f8e3c1a2b4d6e7f8a9b0c1d' } },
+            { 'data.created_at': { $lte: '2026-10-01 00:00:00' } },
+          ],
+        });
+      }
+    });
+
+    it('skips the purchase lists when the feed is filtered by post', async function () {
+      const browse = sinon.stub().resolves(emptyPage());
+      const repository = createRepository({ browse });
+
+      await repository.getEventTimeline({ filter: "data.post_id:'5f8e3c1a2b4d6e7f8a9b0c1d'" });
+
+      sinon.assert.notCalled(browse);
+    });
+
+    it('honours a type filter', async function () {
+      const browse = sinon.stub().resolves(emptyPage());
+      const repository = createRepository({ browse });
+
+      await repository.getEventTimeline({ filter: 'type:-purchase_event' });
+
+      assert.deepEqual(
+        browse.getCalls().map((call) => call.args[0]),
+        ['purchase_refunded_event', 'purchase_revoked_event'],
+      );
+    });
+
+    it('merges purchase rows into the timeline and adds their totals', async function () {
+      const browse = sinon.stub().resolves(emptyPage());
+      browse.withArgs('purchase_event').resolves({
+        data: [purchaseRow('purchase_event', 'p1', '2026-10-01T10:00:00.000Z')],
+        meta: { pagination: { total: 1 } },
+      });
+      browse.withArgs('purchase_revoked_event').resolves({
+        data: [purchaseRow('purchase_revoked_event', 'p1', '2026-10-02T10:00:00.000Z')],
+        meta: { pagination: { total: 1 } },
+      });
+      const repository = createRepository({ browse });
+
+      const result = await repository.getEventTimeline({ limit: 10 });
+
+      assert.deepEqual(
+        result.events.map((event) => event.type),
+        ['purchase_revoked_event', 'purchase_event'],
+      );
+      assert.equal(result.meta.pagination.total, 2);
+    });
+
+    it('sorts a purchase above a signup in the same second', async function () {
+      const browse = sinon.stub().resolves(emptyPage());
+      browse.withArgs('purchase_event').resolves({
+        data: [purchaseRow('purchase_event', 'a-purchase', '2026-10-01T10:00:00.000Z')],
+        meta: { pagination: { total: 1 } },
+      });
+      const repository = createRepository({ browse });
+      repository.getSignupEvents.resolves({
+        data: [
+          {
+            type: 'signup_event',
+            data: { id: 'z-signup', created_at: new Date('2026-10-01T10:00:00.000Z') },
+          },
+        ],
+        meta: { pagination: { total: 1 } },
+      });
+
+      const result = await repository.getEventTimeline({ limit: 10 });
+
+      assert.deepEqual(
+        result.events.map((event) => event.type),
+        ['purchase_event', 'signup_event'],
+      );
+    });
+
+    it('sorts a revoke or refund above its purchase in the same second', async function () {
+      const at = '2026-10-01T10:00:00.000Z';
+      const browse = sinon.stub();
+      for (const type of ['purchase_event', 'purchase_refunded_event', 'purchase_revoked_event']) {
+        browse.withArgs(type).resolves({
+          data: [purchaseRow(type, 'same-purchase', at)],
+          meta: { pagination: { total: 1 } },
+        });
+      }
+      const repository = createRepository({ browse });
+
+      const result = await repository.getEventTimeline({ limit: 10 });
+
+      assert.deepEqual(
+        result.events.map((event) => event.type),
+        ['purchase_refunded_event', 'purchase_revoked_event', 'purchase_event'],
+      );
+    });
+
+    it('returns empty pages when the purchases service is not wired', async function () {
+      const repository = createRepository(undefined);
+
+      assert.deepEqual(await repository.getPurchaseEvents({}, undefined), emptyPage());
+      assert.deepEqual(await repository.getPurchaseRefundedEvents({}, undefined), emptyPage());
+      assert.deepEqual(await repository.getPurchaseRevokedEvents({}, undefined), emptyPage());
+
+      const result = await repository.getEventTimeline({ limit: 10 });
+      assert.deepEqual(result.events, []);
+      assert.equal(result.meta.pagination.total, 0);
+    });
+
+    it('treats a null page from the purchase list as empty', async function () {
+      const repository = createRepository({ browse: sinon.stub().resolves(null) });
+
+      const result = await repository.getEventTimeline({ limit: 10 });
+
+      assert.deepEqual(result.events, []);
+      assert.equal(result.meta.pagination.total, 0);
+    });
+  });
 });

@@ -2779,19 +2779,32 @@ module.exports = class MemberRepository {
    * Status is left alone, except that a member who is 'comped' only through a comp on this
    * same product (and has no active subscription) becomes 'free'.
    *
+   * Staff grants (PurchaseService.grant) pass two guards, checked under the member lock:
+   * - rejectCompLink: refuse (422 PURCHASE_COMP_EXISTS) when the existing link is neither
+   *   purchase-sourced nor backed by an active subscription, i.e. a comp or gift link. Taking
+   *   it over would make a later revoke remove access the member had before the grant.
+   * - requireNewLink: refuse (422 PURCHASE_BACKDATE_LINK_EXISTS) when any link exists. A
+   *   backdate sets the new link's 'added' event date, which drip reads as the access start.
+   *
    * @param {object} data
    * @param {string} data.memberId
    * @param {string} data.productId
    * @param {Date | null} [data.expiresAt]
+   * @param {Date | null} [data.grantedAt] created_at of the 'added' event (a backdated grant)
    * @param {object} [options]
    * @param {Knex.Transaction} [options.transacting]
+   * @param {boolean} [options.requireNewLink]
+   * @param {boolean} [options.rejectCompLink]
    */
-  async grantPurchasedProduct({ memberId, productId, expiresAt = null }, options = {}) {
+  async grantPurchasedProduct(
+    { memberId, productId, expiresAt = null, grantedAt = null },
+    { requireNewLink = false, rejectCompLink = false, ...options } = {},
+  ) {
     if (!options.transacting) {
       return this._Member.transaction((transacting) => {
         return this.grantPurchasedProduct(
-          { memberId, productId, expiresAt },
-          { ...options, transacting },
+          { memberId, productId, expiresAt, grantedAt },
+          { ...options, requireNewLink, rejectCompLink, transacting },
         );
       });
     }
@@ -2801,7 +2814,14 @@ module.exports = class MemberRepository {
       {
         ...options,
         forUpdate: true,
-        withRelated: ['products', 'stripeSubscriptions'],
+        withRelated: rejectCompLink
+          ? [
+              'products',
+              'stripeSubscriptions',
+              'stripeSubscriptions.stripePrice',
+              'stripeSubscriptions.stripePrice.stripeProduct',
+            ]
+          : ['products', 'stripeSubscriptions'],
         require: false,
       },
     );
@@ -2812,6 +2832,35 @@ module.exports = class MemberRepository {
     // Each product keeps its own expiry_at, which Member.edit writes back unchanged
     const current = member.related('products').toJSON();
     const existing = current.find((product) => product.id === productId);
+
+    if (existing && rejectCompLink) {
+      const purchaseIds = (await this._getPurchaseSourcedProducts(memberId, options)).map(
+        (product) => product.id,
+      );
+      const subscriptionBacked = member
+        .related('stripeSubscriptions')
+        .models.some(
+          (sub) =>
+            this.isActiveSubscriptionStatus(sub.get('status')) &&
+            sub.related('stripePrice')?.related('stripeProduct')?.get('product_id') === productId,
+        );
+      if (!purchaseIds.includes(productId) && !subscriptionBacked) {
+        throw new errors.ValidationError({
+          message:
+            'Member already has complimentary or gift access to this tier. Remove it before granting a purchase.',
+          property: 'tier_id',
+          code: 'PURCHASE_COMP_EXISTS',
+        });
+      }
+    }
+
+    if (existing && requireNewLink) {
+      throw new errors.ValidationError({
+        message: "Member already has access to this tier, so access can't be backdated.",
+        property: 'created_at',
+        code: 'PURCHASE_BACKDATE_LINK_EXISTS',
+      });
+    }
 
     const statusData = {};
     if (existing && member.get('status') === 'comped') {
@@ -2850,7 +2899,13 @@ module.exports = class MemberRepository {
 
     if (!existing) {
       await this._MemberProductEvent.add(
-        { member_id: memberId, product_id: productId, action: 'added' },
+        {
+          member_id: memberId,
+          product_id: productId,
+          action: 'added',
+          // A caller-supplied created_at is kept by the model layer (backdated grant).
+          ...(grantedAt ? { created_at: grantedAt } : {}),
+        },
         options,
       );
     }
@@ -2866,21 +2921,26 @@ module.exports = class MemberRepository {
   }
 
   /**
-   * Unlinks a refunded purchase's product, unless another purchase or an active subscription
-   * still grants it. Call it after the purchase is marked refunded, in the same transaction.
+   * Unlinks a refunded or revoked purchase's product, unless another purchase or an active
+   * subscription still grants it. Call it after the purchase is marked refunded or revoked, in the
+   * same transaction.
    * A 'comped' member left with no comp links becomes 'free'; 'gift' status is left alone, and a
    * gift member keeps the link when it is also the gift's tier.
    *
    * @param {object} data
    * @param {string} data.memberId
    * @param {string} data.productId
+   * @param {'refund' | 'revoke'} [data.reason] what ended the purchase, for the logs
    * @param {object} [options]
    * @param {Knex.Transaction} [options.transacting]
    */
-  async revokePurchasedProduct({ memberId, productId }, options = {}) {
+  async revokePurchasedProduct({ memberId, productId, reason = 'refund' }, options = {}) {
     if (!options.transacting) {
       return this._Member.transaction((transacting) => {
-        return this.revokePurchasedProduct({ memberId, productId }, { ...options, transacting });
+        return this.revokePurchasedProduct(
+          { memberId, productId, reason },
+          { ...options, transacting },
+        );
       });
     }
 
@@ -2926,18 +2986,18 @@ module.exports = class MemberRepository {
 
     // A gift member always holds its gift link, and a different gift tier would still be among
     // the non-purchase links. With none left, this product is the gift's own link: keep it until
-    // the gift lifecycle removes it, so the refund does not take away gift access.
+    // the gift lifecycle removes it, so the refund or revoke does not take away gift access.
     if (
       member.get('status') === 'gift' &&
       remaining.filter((product) => !purchaseIds.includes(product.id)).length === 0
     ) {
       logging.warn(
         {
-          event: { name: 'purchase.refund_kept_gift_link' },
+          event: { name: `purchase.${reason}_kept_gift_link` },
           memberId,
           productId,
         },
-        'Refunded purchase tier is also the member gift tier; keeping the link for the gift',
+        `${reason === 'revoke' ? 'Revoked' : 'Refunded'} purchase tier is also the member gift tier; keeping the link for the gift`,
       );
       return member;
     }

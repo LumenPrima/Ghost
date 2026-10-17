@@ -7,6 +7,9 @@ import labelsEdit from './labels-edit.json' with { type: 'json' };
 import labels from './labels.json' with { type: 'json' };
 import mediaUpload from './media-upload.json' with { type: 'json' };
 import media from './media.json' with { type: 'json' };
+// fork(salvare): staff grants of one-time tier purchases
+import memberPurchasesAdd from './member_purchases-add.json' with { type: 'json' };
+import memberPurchases from './member_purchases.json' with { type: 'json' };
 import membersAdd from './members-add.json' with { type: 'json' };
 import membersEdit from './members-edit.json' with { type: 'json' };
 import membersUpload from './members-upload.json' with { type: 'json' };
@@ -43,6 +46,8 @@ export const schemas = {
   labels,
   'media-upload': mediaUpload,
   media,
+  'member_purchases-add': memberPurchasesAdd, // fork(salvare)
+  member_purchases: memberPurchases, // fork(salvare)
   'members-add': membersAdd,
   'members-edit': membersEdit,
   'members-upload': membersUpload,
@@ -78,6 +83,7 @@ export const actionSchemaNames = [
   'media-upload',
   'labels-add',
   'labels-edit',
+  'member_purchases-add', // fork(salvare)
   'members-add',
   'members-edit',
   'members-upload',

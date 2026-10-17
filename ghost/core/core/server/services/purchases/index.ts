@@ -1,6 +1,7 @@
 // fork(salvare): one-time tier purchases. See README.md.
 import { PurchaseCheckoutAdapter } from './purchase-checkout-adapter';
 import { PurchaseEmailService } from './purchase-email-service';
+import { PurchaseEventRepository } from './purchase-event-repository';
 import { PurchaseKnexRepository } from './purchase-knex-repository';
 import { MembersApiMagicLinks } from './purchase-magic-links';
 import { PurchaseService } from './purchase-service';
@@ -26,7 +27,8 @@ export function init(): void {
   const urlUtils = require('../../../shared/url-utils').default;
   const settingsHelpers = require('../settings-helpers');
   const emailAddressParser = require('../email-address/email-address-parser');
-  const { blogIcon } = require('../../../server/lib/image');
+  const { blogIcon, gravatar } = require('../../../server/lib/image');
+  const config = require('../../../shared/config');
 
   const purchaseRepository = new PurchaseKnexRepository({ knex: db.knex });
   const checkoutAdapter = new PurchaseCheckoutAdapter({
@@ -59,5 +61,17 @@ export function init(): void {
       return staffService.api.emails;
     },
     urlUtils,
+    eventRepository: new PurchaseEventRepository({
+      knex: db.knex,
+      // As the Member model's toJSON computes it.
+      getAvatarImage: (email: string) =>
+        config.isPrivacyDisabled('useGravatar')
+          ? null
+          : gravatar.url(email, { size: 250, default: 'blank' }),
+    }),
+    // Set when the members service boots, which is after this init.
+    get verificationTrigger() {
+      return membersService.verificationTrigger;
+    },
   });
 }

@@ -1,7 +1,11 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import Handlebars from 'handlebars';
-import { renderText, type PurchaseAccessEmailData } from './email-templates/purchase-access';
+import {
+  getSubject,
+  renderText,
+  type PurchaseAccessEmailData,
+} from './email-templates/purchase-access';
 
 const DEFAULT_ACCENT_COLOR = '#15212A';
 
@@ -38,6 +42,8 @@ export interface AccessEmailData {
   accessUrl: string;
   amount: number;
   currency: string;
+  // A staff grant: the copy says "You've been given access", with no amount and no thanks.
+  granted?: boolean;
 }
 
 export interface PurchaseEmailServiceDeps {
@@ -78,13 +84,14 @@ export class PurchaseEmailService {
         isNewMember: data.isNewMember,
         accessUrl: data.accessUrl,
         amount: this.formatAmount(data.amount, data.currency),
+        granted: data.granted === true,
       },
     };
     const template = await this.getTemplate();
 
     await this.deps.transactionalMailer.send({
       to: data.toEmail,
-      subject: `You now have access to ${data.tierName}`,
+      subject: getSubject(templateData),
       html: template(templateData),
       text: renderText(templateData),
       from: this.deps.getFromAddress(),

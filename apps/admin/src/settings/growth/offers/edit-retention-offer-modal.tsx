@@ -42,7 +42,11 @@ import {
   getOfferPortalPreviewUrl,
   type offerPortalPreviewUrlTypes,
 } from '@/settings/utils/get-offers-portal-preview-url';
-import { getPaidActiveTiers, useBrowseTiers } from '@tryghost/admin-x-framework/api/tiers';
+import {
+  getPaidActiveTiers,
+  isPurchaseOnlyTier, // fork(salvare)
+  useBrowseTiers,
+} from '@tryghost/admin-x-framework/api/tiers';
 import { toast } from 'sonner';
 import { useEffect, useMemo, useState } from 'react';
 import { useGlobalData } from '@/settings/providers/global-data-context';
@@ -515,7 +519,10 @@ const EditRetentionOfferModal: React.FC<{ cadence: 'monthly' | 'yearly' }> = ({ 
   const [href, setHref] = useState<string>('');
   const breadcrumbTitle = cadence === 'monthly' ? 'Monthly retention' : 'Yearly retention';
   const offerCadence = cadence === 'monthly' ? 'month' : 'year';
-  const activePaidTiers = getPaidActiveTiers(tiers || []);
+  // fork(salvare): a purchase-only tier has no subscription to retain
+  const activePaidTiers = getPaidActiveTiers(tiers || []).filter(
+    (tier) => !isPurchaseOnlyTier(tier),
+  );
   const retentionOffersByCadence = useMemo(() => {
     return allOffers
       .filter((offer) => {

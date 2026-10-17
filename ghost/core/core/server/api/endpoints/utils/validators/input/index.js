@@ -40,6 +40,11 @@ module.exports = {
     return require('./members');
   },
 
+  // fork(salvare): one-time purchases
+  get member_purchases() {
+    return require('./member_purchases');
+  },
+
   get tiers() {
     return require('./tiers');
   },

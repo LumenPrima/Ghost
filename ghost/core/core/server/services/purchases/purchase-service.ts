@@ -11,6 +11,7 @@ import {
   DuplicatePurchaseError,
   isUniqueViolation,
   type PurchaseRepository,
+  type PurchaseTierRow,
 } from './purchase-knex-repository';
 import type { AccessEmailData } from './purchase-email-service';
 import type { PurchaseMagicLinks } from './purchase-magic-links';
@@ -19,6 +20,18 @@ import {
   type NewPurchaseData,
   type PurchaseData,
 } from './purchase-schema';
+import {
+  PurchaseErrorCode,
+  type AdminPurchaseView,
+  type GrantPurchaseInput,
+  type MemberPurchaseView,
+  type ParsedNqlFilter,
+  type PurchaseAdminOperations,
+  type PurchaseEventBrowseOptions,
+  type PurchaseEventPage,
+  type PurchaseEventType,
+  type RevokePurchaseInput,
+} from './purchase-views';
 
 const EMAIL_MAX_LENGTH = 191;
 const NAME_MAX_LENGTH = 191;
@@ -34,7 +47,20 @@ const errorMessages = {
   alreadyOwned: 'You already own this.',
   signInRequired: 'Please sign in to continue. We sent you a sign-in link.',
   authenticatedMemberMissing: 'You must be signed in to continue.',
+  memberNotFound: 'Member not found.',
+  purchaseNotFound: 'Purchase not found.',
+  memberAlreadyOwns: 'Member already owns this tier.',
+  invalidGrant: 'Invalid purchase grant.',
 };
+
+// A staff grant's created_at: an explicit UTC offset, so the server never reads
+// it in its own time zone. Within MySQL DATETIME range and not in the future.
+const GRANT_DATE_MIN = new Date('2000-01-01T00:00:00.000Z');
+const GRANT_DATE_FUTURE_LEEWAY_MS = 5 * 60 * 1000;
+const ISO_WITH_OFFSET_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/i;
+// members_purchases.amount is an unsigned int; this bound fits both databases.
+const MAX_AMOUNT = 2147483647;
 
 export interface PurchaseMember extends PurchaseMemberModel {
   get(key: 'email'): string;
@@ -71,11 +97,17 @@ interface MemberRepository {
     options?: { transacting?: Knex.Transaction },
   ): Promise<unknown>;
   grantPurchasedProduct(
-    data: { memberId: string; productId: string; expiresAt: Date | null },
-    options: { transacting: Knex.Transaction },
+    data: { memberId: string; productId: string; expiresAt: Date | null; grantedAt?: Date | null },
+    options: {
+      transacting: Knex.Transaction;
+      // Refuse (PURCHASE_BACKDATE_LINK_EXISTS) when the member already holds any link to the tier.
+      requireNewLink?: boolean;
+      // Refuse (PURCHASE_COMP_EXISTS) when the existing link is a comp or gift link.
+      rejectCompLink?: boolean;
+    },
   ): Promise<unknown>;
   revokePurchasedProduct(
-    data: { memberId: string; productId: string },
+    data: { memberId: string; productId: string; reason?: 'refund' | 'revoke' },
     options: { transacting: Knex.Transaction },
   ): Promise<unknown>;
 }
@@ -96,6 +128,18 @@ interface CheckoutAdapter {
 
 interface PurchaseEmailService {
   sendAccessEmail(data: AccessEmailData): Promise<void>;
+}
+
+interface PurchaseEventRepository {
+  browse(
+    type: PurchaseEventType,
+    options?: PurchaseEventBrowseOptions,
+    filter?: ParsedNqlFilter,
+  ): Promise<PurchaseEventPage>;
+}
+
+interface VerificationTrigger {
+  checkVerificationRequired(): Promise<boolean>;
 }
 
 interface StaffServiceEmails {
@@ -119,6 +163,10 @@ export interface PurchaseServiceDeps {
   purchaseEmailService: PurchaseEmailService;
   staffServiceEmails: StaffServiceEmails;
   urlUtils: { getSiteUrl(): string };
+  eventRepository: PurchaseEventRepository;
+  // Unset until the members service has booted; then a grant email is skipped while
+  // the site needs email verification, as the Admin member add endpoint does.
+  verificationTrigger?: VerificationTrigger | null;
 }
 
 export interface PurchaseBuyer {
@@ -267,6 +315,100 @@ const RefundInputSchema = z.object({
 
 const OBJECT_ID_PATTERN = /^[0-9a-f]{24}$/i;
 
+const ObjectIdSchema = z.string().regex(OBJECT_ID_PATTERN, 'must be an object id');
+
+const GrantDateSchema = z
+  .union([
+    z.date(),
+    z.string().trim().regex(ISO_WITH_OFFSET_PATTERN, 'must be ISO 8601 with an offset'),
+  ])
+  .nullish()
+  .transform((value) => (value === undefined || value === null ? null : new Date(value)))
+  .refine((value) => value === null || !Number.isNaN(value.getTime()), 'is not a valid date')
+  .refine((value) => value === null || value.getTime() >= GRANT_DATE_MIN.getTime(), {
+    message: 'must not be before 2000-01-01',
+  })
+  .refine(
+    (value) => value === null || value.getTime() <= Date.now() + GRANT_DATE_FUTURE_LEEWAY_MS,
+    { message: 'must not be in the future' },
+  );
+
+const GrantInputSchema = z.object({
+  memberId: ObjectIdSchema,
+  tierId: ObjectIdSchema,
+  createdAt: GrantDateSchema,
+  amount: z
+    .number()
+    .int()
+    .min(0)
+    .max(MAX_AMOUNT)
+    .nullish()
+    .transform((value) => value ?? 0),
+  currency: z
+    .string()
+    .regex(/^[a-z]{3}$/i, 'must be a 3-letter currency code')
+    .nullish()
+    .transform((value) => (value ? value.toLowerCase() : null)),
+  sendEmail: z
+    .boolean()
+    .nullish()
+    .transform((value) => value === true),
+  actor: z
+    .string()
+    .nullish()
+    .transform((value) => value ?? null),
+});
+
+// Maps a GrantInputSchema path to the Admin API body property.
+const GRANT_PROPERTIES: Record<string, string> = {
+  memberId: 'id',
+  tierId: 'tier_id',
+  createdAt: 'created_at',
+  amount: 'amount',
+  currency: 'currency',
+  sendEmail: 'send_email',
+};
+
+function hasErrorCode(err: unknown, code: string): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === code;
+}
+
+function alreadyOwnedError(): Error {
+  return new errors.ValidationError({
+    message: errorMessages.memberAlreadyOwns,
+    property: 'tier_id',
+    code: PurchaseErrorCode.alreadyOwned,
+  });
+}
+
+function toTierRef(tier: PurchaseTierRow): { id: string; name: string; slug: string } {
+  return { id: tier.id, name: tier.name, slug: tier.slug };
+}
+
+function toAdminView(
+  purchase: PurchaseData,
+  tier: { id: string; name: string; slug: string },
+): AdminPurchaseView {
+  return {
+    id: purchase.id,
+    // Only rows of an existing member are listed.
+    member_id: purchase.memberId ?? '',
+    tier,
+    status: purchase.status,
+    source: purchase.stripeCheckoutSessionId ? 'stripe' : 'manual',
+    amount: purchase.amount,
+    currency: purchase.currency,
+    stripe_payment_intent_id: purchase.stripePaymentIntentId,
+    stripe_checkout_session_id: purchase.stripeCheckoutSessionId,
+    stripe_customer_id: purchase.stripeCustomerId,
+    expires_at: purchase.expiresAt,
+    refunded_at: purchase.refundedAt,
+    revoked_at: purchase.revokedAt,
+    created_at: purchase.createdAt,
+    updated_at: purchase.updatedAt,
+  };
+}
+
 // Member creation lost a race with the pre-checkout magic link: the email now
 // belongs to a member committed by another request. fulfil() retries once.
 class MemberCreationRaceError extends Error {
@@ -295,7 +437,7 @@ function fit(value: string | null, maxLength: number): string | null {
   return value === null ? null : value.slice(0, maxLength);
 }
 
-export class PurchaseService {
+export class PurchaseService implements PurchaseAdminOperations {
   private readonly deps: PurchaseServiceDeps;
 
   constructor(deps: PurchaseServiceDeps) {
@@ -374,7 +516,8 @@ export class PurchaseService {
     // minted for an existing account.
     if (member && !buyer.isAuthenticated) {
       try {
-        await this.deps.magicLinks.sendSigninEmail(member.get('email'));
+        // The sign-in link lands back on the page that started checkout.
+        await this.deps.magicLinks.sendSigninEmail(member.get('email'), data.cancelUrl);
       } catch (err) {
         logging.warn(err);
       }
@@ -576,7 +719,9 @@ export class PurchaseService {
       // link when the revoke decides what to keep.
       await this.deps.purchaseRepository.markRefunded(locked.id, new Date(), { transacting });
 
-      if (locked.memberId) {
+      // A revoked purchase already gave its access back. Unlinking now could
+      // remove access granted since then (a comp on the same tier).
+      if (locked.memberId && locked.status !== 'revoked') {
         await this.deps.memberRepository.revokePurchasedProduct(
           { memberId: locked.memberId, productId: locked.productId },
           { transacting },
@@ -585,6 +730,216 @@ export class PurchaseService {
     });
 
     return true;
+  }
+
+  /**
+   * Staff grant (Admin API): a manual purchase of a purchase-only tier, with
+   * lifetime access. A backdated grant also dates the link's 'added' event, so
+   * drip counts from it. Refused with 422 when the member already owns the tier
+   * (PURCHASE_ALREADY_OWNED), holds it through a comp or gift
+   * (PURCHASE_COMP_EXISTS), or holds it at all when backdating
+   * (PURCHASE_BACKDATE_LINK_EXISTS). Sends no staff email.
+   */
+  async grant(input: GrantPurchaseInput): Promise<AdminPurchaseView> {
+    const parsed = GrantInputSchema.safeParse(input);
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      const key = String(issue.path[0] ?? '');
+      if (key === 'memberId') {
+        throw new errors.NotFoundError({ message: errorMessages.memberNotFound });
+      }
+      throw new errors.ValidationError({
+        message: errorMessages.invalidGrant,
+        property: GRANT_PROPERTIES[key] ?? key,
+        context: `${GRANT_PROPERTIES[key] ?? key} ${issue.message}`,
+      });
+    }
+    const data = parsed.data;
+
+    const tier = await this.deps.tiersService.api.read(data.tierId);
+    if (!tier) {
+      throw new errors.ValidationError({
+        message: errorMessages.tierNotFound,
+        property: 'tier_id',
+      });
+    }
+    if (tier.status === 'archived') {
+      throw new errors.ValidationError({
+        message: errorMessages.tierArchived,
+        property: 'tier_id',
+      });
+    }
+    // Only purchase-only tiers: staff can't grant a subscription tier for life.
+    if (
+      tier.type !== 'paid' ||
+      !tier.currency ||
+      !Number.isSafeInteger(tier.oneTimePrice) ||
+      (tier.oneTimePrice ?? 0) <= 0
+    ) {
+      throw new errors.ValidationError({
+        message: errorMessages.tierNotPurchasable,
+        property: 'tier_id',
+      });
+    }
+    const tierId = tier.id.toHexString();
+
+    const member = await this.deps.memberRepository.get({ id: data.memberId });
+    if (!member) {
+      throw new errors.NotFoundError({ message: errorMessages.memberNotFound });
+    }
+
+    // Friendly pre-check, so a rerun of a migration script gets a clear 422.
+    if (await this.deps.purchaseRepository.hasActivePurchase(member.id, tierId)) {
+      throw alreadyOwnedError();
+    }
+
+    const backdated = data.createdAt !== null;
+    const purchase = await this.deps.purchaseRepository.transaction(async (transacting) => {
+      // Takes the member lock first, the same lock order as fulfil.
+      try {
+        await this.deps.memberRepository.grantPurchasedProduct(
+          { memberId: member.id, productId: tierId, expiresAt: null, grantedAt: data.createdAt },
+          { transacting, requireNewLink: backdated, rejectCompLink: true },
+        );
+      } catch (err) {
+        // A concurrent grant of the same tier committed first: report that, not the backdate.
+        if (
+          hasErrorCode(err, PurchaseErrorCode.backdateLinkExists) &&
+          (await this.deps.purchaseRepository.hasActivePurchase(member.id, tierId, {
+            transacting,
+          }))
+        ) {
+          throw alreadyOwnedError();
+        }
+        throw err;
+      }
+
+      if (
+        await this.deps.purchaseRepository.hasActivePurchase(member.id, tierId, { transacting })
+      ) {
+        throw alreadyOwnedError();
+      }
+
+      return this.deps.purchaseRepository.create(
+        {
+          memberId: member.id,
+          productId: tierId,
+          stripeCheckoutSessionId: null,
+          stripePaymentIntentId: null,
+          stripeCustomerId: null,
+          amount: data.amount,
+          currency: data.currency ?? (tier.currency ?? '').toLowerCase(),
+          ...(data.createdAt ? { createdAt: data.createdAt } : {}),
+        },
+        { transacting },
+      );
+    });
+
+    logging.info(
+      {
+        event: { name: 'purchase.granted' },
+        purchaseId: purchase.id,
+        memberId: member.id,
+        tierId,
+        actor: data.actor,
+        backdated,
+      },
+      'Staff granted a purchase',
+    );
+
+    if (data.sendEmail) {
+      await this.sendGrantEmail(member, tier, purchase);
+    }
+
+    return toAdminView(purchase, { id: tierId, name: tier.name, slug: tier.slug });
+  }
+
+  /**
+   * Staff revoke (Admin API). Marks a paid purchase revoked, then unlinks the
+   * tier unless another purchase, an active subscription or a gift still grants
+   * it. Idempotent: a refunded or revoked purchase is left as it is. The
+   * payment, if any, is not refunded.
+   */
+  async revoke(input: RevokePurchaseInput): Promise<void> {
+    const { memberId, purchaseId } = input;
+    if (!OBJECT_ID_PATTERN.test(purchaseId ?? '')) {
+      throw new errors.NotFoundError({ message: errorMessages.purchaseNotFound });
+    }
+
+    const revoked = await this.deps.purchaseRepository.transaction(async (transacting) => {
+      // Locks the purchase row, then (in revokePurchasedProduct) the member: the
+      // same order as refund.
+      const purchase = await this.deps.purchaseRepository.getById(purchaseId, {
+        transacting,
+        forUpdate: true,
+      });
+      if (!purchase || !purchase.memberId || purchase.memberId !== memberId) {
+        throw new errors.NotFoundError({ message: errorMessages.purchaseNotFound });
+      }
+
+      if (purchase.status !== 'paid') {
+        return null;
+      }
+
+      // Mark first: the purchase then no longer counts as a purchase-sourced
+      // link when the revoke decides what to keep.
+      await this.deps.purchaseRepository.markRevoked(purchase.id, new Date(), { transacting });
+      await this.deps.memberRepository.revokePurchasedProduct(
+        { memberId: purchase.memberId, productId: purchase.productId, reason: 'revoke' },
+        { transacting },
+      );
+
+      return purchase;
+    });
+
+    if (revoked) {
+      logging.info(
+        {
+          event: { name: 'purchase.revoked' },
+          purchaseId: revoked.id,
+          memberId: revoked.memberId,
+          tierId: revoked.productId,
+          actor: input.actor ?? null,
+        },
+        'Staff revoked a purchase',
+      );
+    }
+  }
+
+  /** Every purchase of the member, newest first. NotFoundError for an unknown member. */
+  async browseForMember(memberId: string): Promise<AdminPurchaseView[]> {
+    const member = OBJECT_ID_PATTERN.test(memberId ?? '')
+      ? await this.deps.memberRepository.get({ id: memberId })
+      : null;
+    if (!member) {
+      throw new errors.NotFoundError({ message: errorMessages.memberNotFound });
+    }
+
+    const rows = await this.deps.purchaseRepository.browseByMember(member.id);
+
+    return rows.map(({ purchase, tier }) => toAdminView(purchase, toTierRef(tier)));
+  }
+
+  /** The member's active (paid, unexpired) purchases, newest first. No Stripe ids. */
+  async browseActiveForMember(memberId: string): Promise<MemberPurchaseView[]> {
+    const rows = await this.deps.purchaseRepository.browseActiveByMember(memberId);
+
+    return rows.map(({ purchase, tier }) => ({
+      id: purchase.id,
+      tier: { ...toTierRef(tier), welcome_page_url: tier.welcome_page_url },
+      purchased_at: purchase.createdAt,
+      amount: purchase.amount,
+      currency: purchase.currency,
+    }));
+  }
+
+  /** One activity feed list (purchase-event-repository.ts). */
+  async browseEvents(
+    type: PurchaseEventType,
+    options?: PurchaseEventBrowseOptions,
+    filter?: ParsedNqlFilter,
+  ): Promise<PurchaseEventPage> {
+    return this.deps.eventRepository.browse(type, options, filter);
   }
 
   // Lock order: grantPurchasedProduct is the first statement to lock the
@@ -648,11 +1003,15 @@ export class PurchaseService {
     const member = (await this.lookupMember(data))?.member ?? null;
 
     let purchaseId: string;
+    // created_at equal to refunded_at marks a row that never granted access; the
+    // activity feed leaves it out of purchase_event (purchase-event-repository.ts).
+    const recordedAt = new Date();
     try {
       const purchase = await this.deps.purchaseRepository.create({
         ...this.toNewPurchase(data, tierId, member?.id ?? null),
         status: 'refunded',
-        refundedAt: new Date(),
+        refundedAt: recordedAt,
+        createdAt: recordedAt,
       });
       purchaseId = purchase.id;
     } catch (err) {
@@ -842,6 +1201,7 @@ export class PurchaseService {
         accessUrl,
         amount: data.amount,
         currency: data.currency,
+        granted: false,
       });
     } catch (err) {
       logging.error(
@@ -872,6 +1232,47 @@ export class PurchaseService {
           purchaseId: fulfilled.purchaseId,
         },
         'Failed to notify staff of purchase',
+      );
+    }
+  }
+
+  // The member's access email for a staff grant. Never the staff notification.
+  private async sendGrantEmail(
+    member: PurchaseMember,
+    tier: PurchaseTier,
+    purchase: PurchaseData,
+  ): Promise<void> {
+    try {
+      if (await this.deps.verificationTrigger?.checkVerificationRequired()) {
+        logging.warn(
+          { event: { name: 'purchase.grant_email_skipped' }, purchaseId: purchase.id },
+          'Email verification is required; not sending the purchase grant email',
+        );
+        return;
+      }
+
+      const memberEmail = member.get('email');
+      const accessUrl = await this.deps.magicLinks.getSigninLink(
+        memberEmail,
+        this.getWelcomeUrl(tier).toString(),
+      );
+      await this.deps.purchaseEmailService.sendAccessEmail({
+        toEmail: memberEmail,
+        tierName: tier.name,
+        isNewMember: false,
+        accessUrl,
+        amount: purchase.amount,
+        currency: purchase.currency,
+        granted: true,
+      });
+    } catch (err) {
+      logging.error(
+        {
+          event: { name: 'purchase.grant_email_failed' },
+          err,
+          purchaseId: purchase.id,
+        },
+        'Failed to send purchase grant email',
       );
     }
   }

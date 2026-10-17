@@ -4,6 +4,25 @@ import {getNonDecimal, getSymbol} from 'ghost-admin/utils/currency';
 import {ghPluralize} from 'ghost-admin/helpers/gh-pluralize';
 import {inject as service} from '@ember/service';
 
+// fork(salvare): purchase amounts read as the React admin's formatEventAmount
+// (apps/admin member-event.ts) renders them: whole amounts without decimals,
+// anything with cents to two places, with thousands separators. Ghost sells
+// in no zero-decimal currency, so every amount is in cents.
+function formatPurchaseAmount(amount, currency) {
+    const value = amount / 100;
+    const digits = value % 1 === 0 ? 0 : 2;
+    try {
+        return new Intl.NumberFormat('en-US', {
+            style: 'currency',
+            currency: currency.toUpperCase(),
+            minimumFractionDigits: digits,
+            maximumFractionDigits: digits
+        }).format(value);
+    } catch (e) {
+        return getSymbol(currency) + value.toFixed(digits);
+    }
+}
+
 export default class ParseMemberEventHelper extends Helper {
     @service feature;
     @service utils;
@@ -158,6 +177,15 @@ export default class ParseMemberEventHelper extends Helper {
             icon = 'email-changed';
         }
 
+        // fork(salvare): one-time tier purchases
+        if (event.type === 'purchase_event') {
+            icon = 'made-a-payment';
+        }
+
+        if (event.type === 'purchase_refunded_event' || event.type === 'purchase_revoked_event') {
+            icon = 'canceled-subscription';
+        }
+
         return 'event-' + icon;
     }
 
@@ -290,6 +318,26 @@ export default class ParseMemberEventHelper extends Helper {
 
         if (event.type === 'gift_ended_event') {
             return 'gift subscription expired';
+        }
+
+        // fork(salvare): one-time tier purchases. A tier deleted since keeps the
+        // row readable through the generic name.
+        if (event.type === 'purchase_event' || event.type === 'purchase_refunded_event' || event.type === 'purchase_revoked_event') {
+            const tierName = event.data.tier_name || 'a tier';
+
+            if (event.type === 'purchase_refunded_event') {
+                return `Purchase of ${tierName} refunded`;
+            }
+
+            if (event.type === 'purchase_revoked_event') {
+                return `Access to ${tierName} revoked`;
+            }
+
+            if (event.data.amount > 0 && event.data.currency) {
+                return `Purchased ${tierName} for ${formatPurchaseAmount(event.data.amount, event.data.currency)}`;
+            }
+
+            return `Granted access to ${tierName}`;
         }
     }
 

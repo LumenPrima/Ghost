@@ -10,6 +10,7 @@ import {
   type StartPurchaseCheckoutInput,
 } from '../../../../../core/server/services/purchases/purchase-service';
 import { DuplicatePurchaseError } from '../../../../../core/server/services/purchases/purchase-knex-repository';
+import type { GrantPurchaseInput } from '../../../../../core/server/services/purchases/purchase-views';
 import { TIER_ID, buildMember, buildPurchase, buildTier } from './utils';
 
 const transacting = 'trx' as unknown as Knex.Transaction;
@@ -23,6 +24,10 @@ describe('PurchaseService', function () {
     create: sinon.SinonStub;
     markRefunded: sinon.SinonStub;
     transaction: sinon.SinonStub;
+    getById: sinon.SinonStub;
+    browseByMember: sinon.SinonStub;
+    browseActiveByMember: sinon.SinonStub;
+    markRevoked: sinon.SinonStub;
   };
   let checkoutAdapter: {
     getCustomerForMember: sinon.SinonStub;
@@ -44,6 +49,8 @@ describe('PurchaseService', function () {
   };
   let purchaseEmailService: { sendAccessEmail: sinon.SinonStub };
   let staffServiceEmails: { notifyPurchaseReceived: sinon.SinonStub };
+  let eventRepository: { browse: sinon.SinonStub };
+  let verificationTrigger: { checkVerificationRequired: sinon.SinonStub };
   let service: PurchaseService;
   // Set when the transaction callback has resolved: the stub's commit point.
   let committed: boolean;
@@ -63,6 +70,10 @@ describe('PurchaseService', function () {
           committed = true;
           return result;
         }),
+      getById: sinon.stub().resolves(null),
+      browseByMember: sinon.stub().resolves([]),
+      browseActiveByMember: sinon.stub().resolves([]),
+      markRevoked: sinon.stub().resolves(),
     };
     checkoutAdapter = {
       getCustomerForMember: sinon.stub().resolves({ id: 'cus_existing' }),
@@ -95,6 +106,8 @@ describe('PurchaseService', function () {
     };
     purchaseEmailService = { sendAccessEmail: sinon.stub().resolves() };
     staffServiceEmails = { notifyPurchaseReceived: sinon.stub().resolves() };
+    eventRepository = { browse: sinon.stub() };
+    verificationTrigger = { checkVerificationRequired: sinon.stub().resolves(false) };
 
     service = new PurchaseService({
       purchaseRepository,
@@ -105,6 +118,8 @@ describe('PurchaseService', function () {
       purchaseEmailService,
       staffServiceEmails,
       urlUtils: { getSiteUrl: () => SITE_URL },
+      eventRepository,
+      verificationTrigger,
     } as unknown as PurchaseServiceDeps);
 
     sinon.stub(logging, 'error');
@@ -410,7 +425,7 @@ describe('PurchaseService', function () {
         { name: 'NoPermissionError', code: 'PURCHASE_SIGNIN_REQUIRED' },
       );
 
-      sinon.assert.calledOnceWithExactly(magicLinks.sendSigninEmail, 'member@example.com');
+      sinon.assert.calledOnceWithExactly(magicLinks.sendSigninEmail, 'member@example.com', null);
       sinon.assert.notCalled(purchaseRepository.hasActivePurchase);
       sinon.assert.notCalled(magicLinks.getSignupLink);
       sinon.assert.notCalled(checkoutAdapter.createSession);
@@ -546,7 +561,27 @@ describe('PurchaseService', function () {
         ),
         { code: 'PURCHASE_SIGNIN_REQUIRED' },
       );
-      sinon.assert.calledOnceWithExactly(magicLinks.sendSigninEmail, 'member@example.com');
+      sinon.assert.calledOnceWithExactly(magicLinks.sendSigninEmail, 'member@example.com', null);
+    });
+
+    it('sends the sign-in email back to the page that started checkout', async function () {
+      memberRepository.get.resolves(buildMember());
+      const cancelUrl = 'https://example.com/courses/breaking-free/';
+
+      await assert.rejects(
+        service.startCheckout(
+          checkoutInput({
+            cancelUrl,
+            buyer: { memberId: 'member_1', email: 'member@example.com', isAuthenticated: false },
+          }),
+        ),
+        { code: 'PURCHASE_SIGNIN_REQUIRED' },
+      );
+      sinon.assert.calledOnceWithExactly(
+        magicLinks.sendSigninEmail,
+        'member@example.com',
+        cancelUrl,
+      );
     });
 
     it('propagates Stripe errors from price resolution', async function () {
@@ -943,6 +978,7 @@ describe('PurchaseService', function () {
         accessUrl: 'https://example.com/members/?token=signin&action=signin',
         amount: 9900,
         currency: 'usd',
+        granted: false,
       });
       sinon.assert.calledOnceWithExactly(staffServiceEmails.notifyPurchaseReceived, {
         name: 'Buyer Name',
@@ -1009,6 +1045,8 @@ describe('PurchaseService', function () {
         const row = purchaseRepository.create.firstCall.args[0];
         assert.equal(row.status, 'refunded');
         assert.ok(row.refundedAt instanceof Date);
+        // The activity feed's marker for a row that never granted access.
+        assert.equal(row.createdAt, row.refundedAt);
         assert.equal(row.memberId, 'member_1');
         assert.equal(row.stripePaymentIntentId, 'pi_1');
         sinon.assert.notCalled(purchaseRepository.transaction);
@@ -1106,6 +1144,477 @@ describe('PurchaseService', function () {
     });
   });
 
+  describe('grant', function () {
+    const MEMBER_ID = 'aaaaaaaaaaaaaaaaaaaaaaaa';
+    const NOW = new Date('2026-10-09T12:00:00.000Z');
+
+    function grantInput(overrides: Partial<GrantPurchaseInput> = {}): GrantPurchaseInput {
+      return { memberId: MEMBER_ID, tierId: TIER_ID, ...overrides };
+    }
+
+    function createdRow() {
+      return purchaseRepository.create.firstCall.args[0];
+    }
+
+    beforeEach(function () {
+      sinon.useFakeTimers({ now: NOW, toFake: ['Date'] });
+      memberRepository.get
+        .withArgs({ id: MEMBER_ID })
+        .resolves(buildMember({ id: MEMBER_ID, email: 'student@example.com' }));
+      purchaseRepository.create.callsFake(async (data: Record<string, unknown>) =>
+        buildPurchase({
+          id: 'purchase_granted',
+          memberId: MEMBER_ID,
+          stripeCheckoutSessionId: null,
+          stripePaymentIntentId: null,
+          stripeCustomerId: null,
+          amount: data.amount as number,
+          currency: data.currency as string,
+          createdAt: (data.createdAt as Date | undefined) ?? NOW,
+          updatedAt: NOW,
+        }),
+      );
+    });
+
+    it('records a manual purchase and links the tier in one transaction', async function () {
+      const view = await service.grant(grantInput({ actor: 'user_1' }));
+
+      sinon.assert.calledOnceWithExactly(
+        memberRepository.grantPurchasedProduct,
+        { memberId: MEMBER_ID, productId: TIER_ID, expiresAt: null, grantedAt: null },
+        { transacting, requireNewLink: false, rejectCompLink: true },
+      );
+      sinon.assert.callOrder(memberRepository.grantPurchasedProduct, purchaseRepository.create);
+      assert.deepEqual(createdRow(), {
+        memberId: MEMBER_ID,
+        productId: TIER_ID,
+        stripeCheckoutSessionId: null,
+        stripePaymentIntentId: null,
+        stripeCustomerId: null,
+        // Defaults: no revenue, the tier currency lowercased.
+        amount: 0,
+        currency: 'usd',
+      });
+      assert.deepEqual(purchaseRepository.create.firstCall.args[1], { transacting });
+      assert.ok(committed);
+
+      assert.deepEqual(view, {
+        id: 'purchase_granted',
+        member_id: MEMBER_ID,
+        tier: { id: TIER_ID, name: 'Breaking Free', slug: 'breaking-free' },
+        status: 'paid',
+        source: 'manual',
+        amount: 0,
+        currency: 'usd',
+        stripe_payment_intent_id: null,
+        stripe_checkout_session_id: null,
+        stripe_customer_id: null,
+        expires_at: null,
+        refunded_at: null,
+        revoked_at: null,
+        created_at: NOW,
+        updated_at: NOW,
+      });
+      sinon.assert.calledWith(
+        logging.info as sinon.SinonStub,
+        sinon.match({
+          event: { name: 'purchase.granted' },
+          purchaseId: 'purchase_granted',
+          memberId: MEMBER_ID,
+          tierId: TIER_ID,
+          actor: 'user_1',
+          backdated: false,
+        }),
+      );
+      sinon.assert.notCalled(purchaseEmailService.sendAccessEmail);
+      sinon.assert.notCalled(staffServiceEmails.notifyPurchaseReceived);
+    });
+
+    it('records the given amount and currency, lowercased', async function () {
+      await service.grant(grantInput({ amount: 4900, currency: 'EUR' }));
+
+      assert.equal(createdRow().amount, 4900);
+      assert.equal(createdRow().currency, 'eur');
+    });
+
+    it('passes a backdate to both the link event and the purchase row', async function () {
+      const createdAt = '2025-06-01T09:30:00+02:00';
+      const expected = new Date('2025-06-01T07:30:00.000Z');
+
+      const view = await service.grant(grantInput({ createdAt }));
+
+      const [data, options] = memberRepository.grantPurchasedProduct.firstCall.args;
+      assert.deepEqual(data.grantedAt, expected);
+      assert.equal(options.requireNewLink, true);
+      assert.equal(options.rejectCompLink, true);
+      assert.deepEqual(createdRow().createdAt, expected);
+      assert.deepEqual(view.created_at, expected);
+    });
+
+    it('accepts a Date as the backdate', async function () {
+      const createdAt = new Date('2024-01-15T00:00:00.000Z');
+
+      await service.grant(grantInput({ createdAt }));
+
+      assert.deepEqual(createdRow().createdAt, createdAt);
+    });
+
+    it('treats a null backdate as now', async function () {
+      await service.grant(grantInput({ createdAt: null }));
+
+      assert.equal(memberRepository.grantPurchasedProduct.firstCall.args[1].requireNewLink, false);
+      assert.equal('createdAt' in createdRow(), false);
+    });
+
+    for (const [label, createdAt] of [
+      ['in the future', '2026-10-09T12:10:00Z'],
+      ['without a time zone offset', '2025-06-01T09:30:00'],
+      ['a date only', '2025-06-01'],
+      ['before 2000', '1999-12-31T23:59:59Z'],
+      ['not a date', 'yesterday'],
+    ] as const) {
+      it(`rejects a backdate ${label} with a 422 on created_at`, async function () {
+        await assert.rejects(service.grant(grantInput({ createdAt })), {
+          name: 'ValidationError',
+          property: 'created_at',
+        });
+        sinon.assert.notCalled(purchaseRepository.transaction);
+      });
+    }
+
+    it('allows a backdate up to five minutes ahead (clock skew)', async function () {
+      await service.grant(grantInput({ createdAt: '2026-10-09T12:04:00Z' }));
+
+      sinon.assert.calledOnce(purchaseRepository.create);
+    });
+
+    for (const [label, overrides, property] of [
+      ['a negative amount', { amount: -1 }, 'amount'],
+      ['a fractional amount', { amount: 1.5 }, 'amount'],
+      ['an amount too large for the column', { amount: 2147483648 }, 'amount'],
+      ['a currency that is not 3 letters', { currency: 'us' }, 'currency'],
+      ['a malformed tier id', { tierId: 'not-an-id' }, 'tier_id'],
+    ] as const) {
+      it(`rejects ${label} with a 422`, async function () {
+        await assert.rejects(service.grant(grantInput(overrides)), {
+          name: 'ValidationError',
+          property,
+        });
+        sinon.assert.notCalled(tiersService.api.read);
+      });
+    }
+
+    it('rejects a malformed member id as an unknown member', async function () {
+      await assert.rejects(service.grant(grantInput({ memberId: 'nope' })), {
+        name: 'NotFoundError',
+      });
+    });
+
+    for (const [label, tier] of [
+      ['an unknown tier', null],
+      ['an archived tier', buildTier({ status: 'archived' })],
+      ['a free tier', buildTier({ type: 'free' })],
+      ['a subscription-only tier', buildTier({ oneTimePrice: null })],
+    ] as const) {
+      it(`rejects ${label} with a 422 on tier_id`, async function () {
+        tiersService.api.read.resolves(tier);
+
+        await assert.rejects(service.grant(grantInput()), {
+          name: 'ValidationError',
+          property: 'tier_id',
+        });
+        sinon.assert.notCalled(purchaseRepository.transaction);
+      });
+    }
+
+    it('returns 404 for an unknown member', async function () {
+      memberRepository.get.withArgs({ id: MEMBER_ID }).resolves(null);
+
+      await assert.rejects(service.grant(grantInput()), { name: 'NotFoundError' });
+      sinon.assert.notCalled(purchaseRepository.transaction);
+    });
+
+    it('refuses a tier the member already owns before taking any lock', async function () {
+      purchaseRepository.hasActivePurchase.resolves(true);
+
+      await assert.rejects(service.grant(grantInput()), {
+        name: 'ValidationError',
+        code: 'PURCHASE_ALREADY_OWNED',
+        property: 'tier_id',
+      });
+      sinon.assert.notCalled(purchaseRepository.transaction);
+    });
+
+    it('refuses under the lock when a concurrent grant committed first, and rolls back', async function () {
+      purchaseRepository.hasActivePurchase.onFirstCall().resolves(false);
+      purchaseRepository.hasActivePurchase.onSecondCall().resolves(true);
+
+      await assert.rejects(service.grant(grantInput()), { code: 'PURCHASE_ALREADY_OWNED' });
+
+      sinon.assert.calledWith(purchaseRepository.hasActivePurchase.secondCall, MEMBER_ID, TIER_ID, {
+        transacting,
+      });
+      sinon.assert.notCalled(purchaseRepository.create);
+      assert.equal(committed, false);
+      sinon.assert.notCalled(logging.info as sinon.SinonStub);
+    });
+
+    it('passes on a comp refusal from the member repository', async function () {
+      memberRepository.grantPurchasedProduct.rejects(
+        new errors.ValidationError({ message: 'comp', code: 'PURCHASE_COMP_EXISTS' }),
+      );
+
+      await assert.rejects(service.grant(grantInput()), { code: 'PURCHASE_COMP_EXISTS' });
+      sinon.assert.notCalled(purchaseRepository.create);
+    });
+
+    it('passes on a backdate refusal when the member owns no purchase', async function () {
+      memberRepository.grantPurchasedProduct.rejects(
+        new errors.ValidationError({ message: 'link', code: 'PURCHASE_BACKDATE_LINK_EXISTS' }),
+      );
+
+      await assert.rejects(service.grant(grantInput({ createdAt: '2025-01-01T00:00:00Z' })), {
+        code: 'PURCHASE_BACKDATE_LINK_EXISTS',
+      });
+      sinon.assert.notCalled(purchaseRepository.create);
+    });
+
+    it('reports a backdate refusal caused by a concurrent grant as already owned', async function () {
+      memberRepository.grantPurchasedProduct.rejects(
+        new errors.ValidationError({ message: 'link', code: 'PURCHASE_BACKDATE_LINK_EXISTS' }),
+      );
+      purchaseRepository.hasActivePurchase.onFirstCall().resolves(false);
+      purchaseRepository.hasActivePurchase.onSecondCall().resolves(true);
+
+      await assert.rejects(service.grant(grantInput({ createdAt: '2025-01-01T00:00:00Z' })), {
+        code: 'PURCHASE_ALREADY_OWNED',
+      });
+      sinon.assert.calledWith(purchaseRepository.hasActivePurchase.secondCall, MEMBER_ID, TIER_ID, {
+        transacting,
+      });
+    });
+
+    it('sends the member the grant email after commit, and never the staff email', async function () {
+      purchaseEmailService.sendAccessEmail.callsFake(async () => {
+        assert.ok(committed);
+      });
+
+      await service.grant(grantInput({ sendEmail: true }));
+
+      sinon.assert.calledOnceWithExactly(
+        magicLinks.getSigninLink,
+        'student@example.com',
+        'https://example.com/start/',
+      );
+      sinon.assert.calledOnceWithExactly(purchaseEmailService.sendAccessEmail, {
+        toEmail: 'student@example.com',
+        tierName: 'Breaking Free',
+        isNewMember: false,
+        accessUrl: 'https://example.com/members/?token=signin&action=signin',
+        amount: 0,
+        currency: 'usd',
+        granted: true,
+      });
+      sinon.assert.notCalled(staffServiceEmails.notifyPurchaseReceived);
+    });
+
+    it('skips the grant email while email verification is required', async function () {
+      verificationTrigger.checkVerificationRequired.resolves(true);
+
+      await service.grant(grantInput({ sendEmail: true }));
+
+      sinon.assert.notCalled(purchaseEmailService.sendAccessEmail);
+      sinon.assert.calledWith(
+        logging.warn as sinon.SinonStub,
+        sinon.match({ event: { name: 'purchase.grant_email_skipped' } }),
+      );
+    });
+
+    it('still returns the purchase when the grant email fails', async function () {
+      purchaseEmailService.sendAccessEmail.rejects(new Error('mail down'));
+
+      const view = await service.grant(grantInput({ sendEmail: true }));
+
+      assert.equal(view.id, 'purchase_granted');
+      sinon.assert.calledWith(
+        logging.error as sinon.SinonStub,
+        sinon.match({ event: { name: 'purchase.grant_email_failed' } }),
+      );
+    });
+  });
+
+  describe('revoke', function () {
+    const MEMBER_ID = 'aaaaaaaaaaaaaaaaaaaaaaaa';
+    const PURCHASE_ID = 'bbbbbbbbbbbbbbbbbbbbbbbb';
+
+    beforeEach(function () {
+      purchaseRepository.getById.resolves(buildPurchase({ id: PURCHASE_ID, memberId: MEMBER_ID }));
+    });
+
+    it('marks a paid purchase revoked first, then unlinks, in one transaction', async function () {
+      await service.revoke({ memberId: MEMBER_ID, purchaseId: PURCHASE_ID, actor: 'user_1' });
+
+      sinon.assert.calledOnceWithExactly(purchaseRepository.getById, PURCHASE_ID, {
+        transacting,
+        forUpdate: true,
+      });
+      sinon.assert.calledOnceWithExactly(
+        purchaseRepository.markRevoked,
+        PURCHASE_ID,
+        sinon.match.date,
+        { transacting },
+      );
+      sinon.assert.calledOnceWithExactly(
+        memberRepository.revokePurchasedProduct,
+        { memberId: MEMBER_ID, productId: TIER_ID, reason: 'revoke' },
+        { transacting },
+      );
+      sinon.assert.callOrder(
+        purchaseRepository.getById,
+        purchaseRepository.markRevoked,
+        memberRepository.revokePurchasedProduct,
+      );
+      assert.ok(committed);
+      sinon.assert.calledWith(
+        logging.info as sinon.SinonStub,
+        sinon.match({
+          event: { name: 'purchase.revoked' },
+          purchaseId: PURCHASE_ID,
+          actor: 'user_1',
+        }),
+      );
+    });
+
+    for (const status of ['refunded', 'revoked'] as const) {
+      it(`is a no-op for a ${status} purchase`, async function () {
+        purchaseRepository.getById.resolves(
+          buildPurchase({ id: PURCHASE_ID, memberId: MEMBER_ID, status }),
+        );
+
+        await service.revoke({ memberId: MEMBER_ID, purchaseId: PURCHASE_ID });
+
+        sinon.assert.notCalled(purchaseRepository.markRevoked);
+        sinon.assert.notCalled(memberRepository.revokePurchasedProduct);
+        sinon.assert.notCalled(logging.info as sinon.SinonStub);
+      });
+    }
+
+    it("returns 404 for another member's purchase", async function () {
+      await assert.rejects(
+        service.revoke({ memberId: 'cccccccccccccccccccccccc', purchaseId: PURCHASE_ID }),
+        { name: 'NotFoundError' },
+      );
+      sinon.assert.notCalled(purchaseRepository.markRevoked);
+    });
+
+    it('returns 404 for an unknown or malformed purchase id', async function () {
+      purchaseRepository.getById.resolves(null);
+
+      await assert.rejects(service.revoke({ memberId: MEMBER_ID, purchaseId: PURCHASE_ID }), {
+        name: 'NotFoundError',
+      });
+      await assert.rejects(service.revoke({ memberId: MEMBER_ID, purchaseId: 'nope' }), {
+        name: 'NotFoundError',
+      });
+      sinon.assert.calledOnce(purchaseRepository.getById);
+    });
+
+    it('returns 404 for a purchase whose member was deleted', async function () {
+      purchaseRepository.getById.resolves(buildPurchase({ id: PURCHASE_ID, memberId: null }));
+
+      await assert.rejects(service.revoke({ memberId: MEMBER_ID, purchaseId: PURCHASE_ID }), {
+        name: 'NotFoundError',
+      });
+    });
+  });
+
+  describe('browse', function () {
+    const MEMBER_ID = 'aaaaaaaaaaaaaaaaaaaaaaaa';
+    const tierRow = {
+      id: TIER_ID,
+      name: 'Breaking Free',
+      slug: 'breaking-free',
+      welcome_page_url: '/start/',
+    };
+
+    it('lists every purchase of a member as Admin views', async function () {
+      memberRepository.get.withArgs({ id: MEMBER_ID }).resolves(buildMember({ id: MEMBER_ID }));
+      const revokedAt = new Date('2026-10-05T00:00:00.000Z');
+      purchaseRepository.browseByMember.resolves([
+        {
+          purchase: buildPurchase({
+            id: 'p2',
+            memberId: MEMBER_ID,
+            stripeCheckoutSessionId: null,
+            status: 'revoked',
+            revokedAt,
+          }),
+          tier: tierRow,
+        },
+        { purchase: buildPurchase({ id: 'p1', memberId: MEMBER_ID }), tier: tierRow },
+      ]);
+
+      const views = await service.browseForMember(MEMBER_ID);
+
+      sinon.assert.calledOnceWithExactly(purchaseRepository.browseByMember, MEMBER_ID);
+      assert.deepEqual(
+        views.map((view) => [view.id, view.status, view.source, view.revoked_at]),
+        [
+          ['p2', 'revoked', 'manual', revokedAt],
+          ['p1', 'paid', 'stripe', null],
+        ],
+      );
+      assert.deepEqual(views[1].tier, {
+        id: TIER_ID,
+        name: 'Breaking Free',
+        slug: 'breaking-free',
+      });
+      assert.equal(views[1].stripe_payment_intent_id, 'pi_1');
+    });
+
+    it('returns 404 for an unknown member', async function () {
+      await assert.rejects(service.browseForMember(MEMBER_ID), { name: 'NotFoundError' });
+      await assert.rejects(service.browseForMember('nope'), { name: 'NotFoundError' });
+      sinon.assert.notCalled(purchaseRepository.browseByMember);
+    });
+
+    it("lists a member's active purchases without Stripe ids", async function () {
+      const createdAt = new Date('2026-09-01T00:00:00.000Z');
+      purchaseRepository.browseActiveByMember.resolves([
+        { purchase: buildPurchase({ id: 'p1', memberId: MEMBER_ID, createdAt }), tier: tierRow },
+      ]);
+
+      const views = await service.browseActiveForMember(MEMBER_ID);
+
+      sinon.assert.calledOnceWithExactly(purchaseRepository.browseActiveByMember, MEMBER_ID);
+      assert.deepEqual(views, [
+        {
+          id: 'p1',
+          tier: tierRow,
+          purchased_at: createdAt,
+          amount: 9900,
+          currency: 'usd',
+        },
+      ]);
+    });
+
+    it('delegates activity feed lists to the event repository', async function () {
+      const page = { data: [], meta: { pagination: { total: 0 } } };
+      eventRepository.browse.resolves(page);
+      const filter = { member_id: MEMBER_ID };
+
+      const result = await service.browseEvents('purchase_revoked_event', { limit: 5 }, filter);
+
+      assert.equal(result, page);
+      sinon.assert.calledOnceWithExactly(
+        eventRepository.browse,
+        'purchase_revoked_event',
+        { limit: 5 },
+        filter,
+      );
+    });
+  });
+
   describe('refund', function () {
     it('returns false for a payment intent that is not a purchase', async function () {
       const result = await service.refund({ paymentIntentId: 'pi_unknown', fullyRefunded: true });
@@ -1179,6 +1688,22 @@ describe('PurchaseService', function () {
 
       assert.equal(result, true);
       sinon.assert.notCalled(purchaseRepository.markRefunded);
+      sinon.assert.notCalled(memberRepository.revokePurchasedProduct);
+    });
+
+    it('marks a revoked purchase refunded without unlinking again', async function () {
+      purchaseRepository.getByPaymentIntentId.resolves(buildPurchase({ status: 'revoked' }));
+
+      const result = await service.refund({ paymentIntentId: 'pi_1', fullyRefunded: true });
+
+      assert.equal(result, true);
+      sinon.assert.calledOnceWithExactly(
+        purchaseRepository.markRefunded,
+        'purchase_1',
+        sinon.match.date,
+        { transacting },
+      );
+      // A comp granted after the revoke must survive the old payment's refund.
       sinon.assert.notCalled(memberRepository.revokePurchasedProduct);
     });
 

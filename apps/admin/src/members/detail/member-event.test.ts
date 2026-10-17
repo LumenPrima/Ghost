@@ -74,6 +74,10 @@ describe('parseMemberEvent — icon', () => {
     ['gift_redemption_event', {}, 'event-gift'],
     ['gift_ended_event', {}, 'event-gift'],
     ['automated_email_sent_event', {}, 'event-sent-email'],
+    // fork(salvare): one-time tier purchases
+    ['purchase_event', {}, 'event-purchase'],
+    ['purchase_refunded_event', {}, 'event-purchase-ended'],
+    ['purchase_revoked_event', {}, 'event-purchase-ended'],
   ];
   it.each(cases)('%s (%j) → %s', (type, data, expected) => {
     expect(parseMemberEvent(ev(type, data), defaultCtx).icon).toBe(expected);
@@ -370,6 +374,60 @@ describe('parseMemberEvent — gift purchase amount formatting', () => {
   it('falls back gracefully when purchase data is missing', () => {
     expect(parseMemberEvent(ev('gift_purchase_event'), defaultCtx).action).toBe(
       'Purchased gift subscription',
+    );
+  });
+});
+
+// fork(salvare): one-time tier purchases
+describe('parseMemberEvent — purchases', () => {
+  it('a paid purchase names the tier and the amount', () => {
+    const parsed = parseMemberEvent(
+      ev('purchase_event', { tier_name: 'Breaking Free', amount: 9900, currency: 'usd' }),
+      defaultCtx,
+    );
+    expect(parsed.action).toBe('Purchased Breaking Free for $99');
+  });
+
+  it('keeps cents and zero-decimal currencies right', () => {
+    expect(
+      parseMemberEvent(
+        ev('purchase_event', { tier_name: 'Course', amount: 1050, currency: 'usd' }),
+        defaultCtx,
+      ).action,
+    ).toBe('Purchased Course for $10.50');
+    expect(
+      parseMemberEvent(
+        ev('purchase_event', { tier_name: 'Course', amount: 1050, currency: 'jpy' }),
+        defaultCtx,
+      ).action,
+    ).toBe('Purchased Course for ¥1,050');
+  });
+
+  it('a grant that recorded no payment reads as granted access', () => {
+    const parsed = parseMemberEvent(
+      ev('purchase_event', { tier_name: 'Breaking Free', amount: 0, currency: 'usd' }),
+      defaultCtx,
+    );
+    expect(parsed.action).toBe('Granted access to Breaking Free');
+  });
+
+  it('refunds and revokes name the tier', () => {
+    expect(
+      parseMemberEvent(ev('purchase_refunded_event', { tier_name: 'Breaking Free' }), defaultCtx)
+        .action,
+    ).toBe('Purchase of Breaking Free refunded');
+    expect(
+      parseMemberEvent(ev('purchase_revoked_event', { tier_name: 'Breaking Free' }), defaultCtx)
+        .action,
+    ).toBe('Access to Breaking Free revoked');
+  });
+
+  it('falls back to a generic tier name when the tier was deleted', () => {
+    expect(
+      parseMemberEvent(ev('purchase_event', { tier_name: null, amount: 0 }), defaultCtx).action,
+    ).toBe('Granted access to a tier');
+    expect(parseMemberEvent(ev('purchase_revoked_event'), defaultCtx).action).toBe(
+      'Access to a tier revoked',
     );
   });
 });

@@ -165,6 +165,7 @@ module.exports = function setupMembersApp() {
   );
 
   membersApp.use('/api/progress', require('./progress/routes')()); // fork(salvare): lesson progress (plan §5.5)
+  membersApp.use('/api/purchases', require('./purchases/routes')()); // fork(salvare): a member's own purchases
 
   // Announcement
   membersApp.use('/api/announcement', middleware.loadMemberSession, announcementRouter());

@@ -69,6 +69,11 @@ const EventIcon: React.FC<{ iconName: string }> = ({ iconName }) => {
       return <LucideIcon.ThumbsDown {...iconProps} />;
     case 'event-gift':
       return <LucideIcon.Gift {...iconProps} />;
+    // fork(salvare): one-time tier purchases
+    case 'event-purchase':
+      return <LucideIcon.ShoppingBag {...iconProps} />;
+    case 'event-purchase-ended':
+      return <LucideIcon.Undo2 {...iconProps} />;
     default:
       return <LucideIcon.Activity {...iconProps} />;
   }

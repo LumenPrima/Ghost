@@ -5,10 +5,13 @@ import { LucideIcon, formatNumber } from '@tryghost/shade/utils';
 import { Text } from '@tryghost/shade/primitives';
 import { type TierFormState } from './tier-detail-modal';
 import { currencyToDecimal, getSymbol } from '@tryghost/admin-x-framework';
+import { ONE_TIME_PRICE_PLACEHOLDER } from './tier-one-time-price'; // fork(salvare)
 
 interface TierDetailPreviewProps {
   tier: TierFormState;
   isFreeTier: boolean;
+  /** fork(salvare): set (a price, or null while empty) when the tier is sold as a one-time purchase. */
+  oneTimePrice?: number | null;
 }
 
 export const TrialDaysLabel: React.FC<{ size?: 'sm' | 'md'; trialDays: number }> = ({
@@ -78,7 +81,11 @@ const DiscountLabel: React.FC<{ discount: number }> = ({ discount }) => {
   );
 };
 
-const TierDetailPreview: React.FC<TierDetailPreviewProps> = ({ tier, isFreeTier }) => {
+const TierDetailPreview: React.FC<TierDetailPreviewProps> = ({
+  tier,
+  isFreeTier,
+  oneTimePrice, // fork(salvare)
+}) => {
   const [showingYearly, setShowingYearly] = useState(false);
 
   const name = tier?.name || '';
@@ -96,6 +103,13 @@ const TierDetailPreview: React.FC<TierDetailPreviewProps> = ({ tier, isFreeTier 
     tier?.monthly_price && tier?.yearly_price
       ? Math.ceil(((monthlyPrice * 12 - yearlyPrice) / (monthlyPrice * 12)) * 100)
       : 0;
+  // fork(salvare): a one-time price replaces the monthly and yearly prices
+  const isOneTime = !isFreeTier && oneTimePrice !== undefined;
+  const shownPrice = isOneTime
+    ? currencyToDecimal(oneTimePrice ?? ONE_TIME_PRICE_PLACEHOLDER)
+    : showingYearly
+      ? yearlyPrice
+      : monthlyPrice;
 
   return (
     <div className="-mt-2" data-testid="tier-preview">
@@ -103,7 +117,8 @@ const TierDetailPreview: React.FC<TierDetailPreviewProps> = ({ tier, isFreeTier 
         <Text as="h6" className="pb-2 text-base leading-snug" weight="medium">
           {isFreeTier ? 'Free membership preview' : 'Tier preview'}
         </Text>
-        {!isFreeTier && (
+        {/* fork(salvare): no cadence toggle for a one-time price */}
+        {!isFreeTier && !isOneTime && (
           <div className="flex gap-1">
             <Button
               className={
@@ -140,25 +155,32 @@ const TierDetailPreview: React.FC<TierDetailPreviewProps> = ({ tier, isFreeTier 
             </h4>
             <div className="mt-4 flex w-full flex-row flex-wrap items-end justify-between gap-x-1 gap-y-[10px]">
               <div
-                className={`flex flex-wrap text-black ${((showingYearly && tier?.yearly_price === undefined) || (!showingYearly && tier?.monthly_price === undefined)) && !isFreeTier ? 'opacity-30' : ''}`}
+                // fork(salvare): the one-time placeholder is dimmed too
+                className={`flex flex-wrap text-black ${(isOneTime ? oneTimePrice === null : (showingYearly && tier?.yearly_price === undefined) || (!showingYearly && tier?.monthly_price === undefined)) && !isFreeTier ? 'opacity-30' : ''}`}
               >
                 <span className="self-start text-[2.7rem] leading-[1.115] font-bold uppercase">
                   {currencySymbol}
                 </span>
                 <span className="text-[3.4rem] leading-none font-bold tracking-tight break-all">
-                  {formatNumber(showingYearly ? yearlyPrice : monthlyPrice, {
+                  {/* fork(salvare) */}
+                  {formatNumber(shownPrice, {
                     maximumFractionDigits: 20,
                   })}
                 </span>
                 {!isFreeTier && (
                   <span className="ml-1 self-end text-[1.5rem] leading-snug text-gray-800">
-                    /{showingYearly ? 'year' : 'month'}
+                    {/* fork(salvare) */}
+                    {isOneTime ? 'one-time' : `/${showingYearly ? 'year' : 'month'}`}
                   </span>
                 )}
               </div>
-              <TrialDaysLabel trialDays={trialDays} />
+              {/* fork(salvare): a one-time purchase has no trial */}
+              <TrialDaysLabel trialDays={isOneTime ? 0 : trialDays} />
             </div>
-            {showingYearly && yearlyDiscount > 0 && <DiscountLabel discount={yearlyDiscount} />}
+            {/* fork(salvare) */}
+            {showingYearly && !isOneTime && yearlyDiscount > 0 && (
+              <DiscountLabel discount={yearlyDiscount} />
+            )}
           </div>
           <div className="flex-column flex w-full flex-1">
             <div className="flex-1">

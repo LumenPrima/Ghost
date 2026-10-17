@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useMemo } from 'react';
 import {
   Checkbox,
   Field,
+  FieldDescription, // fork(salvare)
   FieldGroup,
   FieldLabel,
   FieldLegend,
@@ -22,12 +23,17 @@ import {
   checkStripeEnabled,
   getSettingValues,
 } from '@tryghost/admin-x-framework/api/settings';
-import { type Tier, getPaidActiveTiers } from '@tryghost/admin-x-framework/api/tiers';
+import {
+  type Tier,
+  getPaidActiveTiers,
+  isPurchaseOnlyTier, // fork(salvare)
+} from '@tryghost/admin-x-framework/api/tiers';
 import { useGlobalData } from '@/settings/providers/global-data-context';
 
 type SignupCheckbox = {
   checked: boolean;
   disabled?: boolean;
+  hint?: string; // fork(salvare)
   label: string;
   onChange: (checked: boolean) => void;
   testId?: string;
@@ -144,8 +150,13 @@ const SignupOptions: React.FC<{
 
   if (isStripeEnabled && paidActiveTiers.length > 0) {
     paidActiveTiers.forEach((tier) => {
+      // fork(salvare): Portal would sell a public course as a subscription, which checkout
+      // refuses. A stray public one can still be unchecked.
+      const purchaseOnly = isPurchaseOnlyTier(tier);
       tiersCheckboxes.push({
         checked: tier.visibility === 'public',
+        disabled: purchaseOnly && tier.visibility !== 'public',
+        hint: purchaseOnly ? 'Sold as a one-time purchase' : undefined,
         label: tier.name,
         value: tier.id,
         onChange: (checked) => updateTier({ ...tier, visibility: checked ? 'public' : 'none' }),
@@ -156,7 +167,8 @@ const SignupOptions: React.FC<{
   const arePaidTiersVisible =
     isStripeEnabled &&
     paidActiveTiers.length > 0 &&
-    paidActiveTiers.some((tier) => tier.visibility === 'public');
+    // fork(salvare): purchase-only tiers have no monthly or yearly prices to offer
+    paidActiveTiers.some((tier) => tier.visibility === 'public' && !isPurchaseOnlyTier(tier));
 
   return (
     <div className="mt-7">
@@ -181,6 +193,9 @@ const SignupOptions: React.FC<{
                 orientation="horizontal"
               >
                 <Checkbox
+                  aria-describedby={
+                    checkbox.hint ? `portal-tier-${checkbox.value}-hint` : undefined
+                  } // fork(salvare)
                   checked={checkbox.checked}
                   data-testid={checkbox.testId}
                   disabled={checkbox.disabled}
@@ -188,6 +203,12 @@ const SignupOptions: React.FC<{
                   onCheckedChange={(checked) => checkbox.onChange(checked === true)}
                 />
                 <FieldLabel htmlFor={`portal-tier-${checkbox.value}`}>{checkbox.label}</FieldLabel>
+                {/* fork(salvare) */}
+                {checkbox.hint && (
+                  <FieldDescription id={`portal-tier-${checkbox.value}-hint`}>
+                    {checkbox.hint}
+                  </FieldDescription>
+                )}
               </Field>
             ))}
           </FieldGroup>

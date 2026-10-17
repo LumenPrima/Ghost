@@ -15,6 +15,7 @@ import {
   LoadingIndicator,
 } from '@tryghost/shade/components';
 import { LucideIcon } from '@tryghost/shade/utils';
+import { getSubscriptionTierIds } from './member-purchase-tiers'; // fork(salvare)
 import { toast } from 'sonner';
 import { useEditMember, useMembersFetching } from '@tryghost/admin-x-framework/api/members';
 import type { Member } from '@tryghost/admin-x-framework/api/members';
@@ -45,8 +46,12 @@ const MemberSubscriptionCompActions: React.FC<MemberSubscriptionCompActionsProps
     // Preserve `expiry_at` on the surviving tiers — the server pivot update
     // treats a missing expiry_at as `null` and would silently wipe the
     // expiration for any other comp tier on this member.
+    // fork(salvare): only send tiers that still have a subscription row. A
+    // purchased tier is kept by the server regardless, and a stale entry (say a
+    // course refunded since the page loaded) would otherwise come back as a comp.
+    const subscriptionTierIds = getSubscriptionTierIds(member);
     const remainingTiers = (member.tiers ?? [])
-      .filter((tier) => tier.id !== tierId)
+      .filter((tier) => tier.id !== tierId && subscriptionTierIds.has(tier.id))
       .map((tier) => ({ id: tier.id, expiry_at: tier.expiry_at ?? null }));
     // Include `email` to match Ember exactly (`gh-member-settings-form.js:194-198`).
     editMember.mutate(

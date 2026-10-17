@@ -66,6 +66,7 @@ module.exports = function getConfigProperties() {
     pintura: config.get('pintura'),
     signupForm: config.get('signupForm'),
     security: config.get('security'),
+    salvare: { purchases: true }, // fork(salvare): capability flag for Admin's purchase surfaces
   };
 
   if (config.get('explore') && config.get('explore:testimonials_url')) {

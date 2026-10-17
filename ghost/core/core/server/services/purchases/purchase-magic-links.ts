@@ -11,7 +11,8 @@ export interface PurchaseMagicLinks {
     referrer: string,
   ): Promise<string>;
   getSigninLink(email: string, referrer: string): Promise<string>;
-  sendSigninEmail(email: string): Promise<void>;
+  /** referrer: where the link lands after sign-in (the page that started checkout). */
+  sendSigninEmail(email: string, referrer?: string | null): Promise<void>;
 }
 
 interface MembersApi {
@@ -20,7 +21,11 @@ interface MembersApi {
     type: 'signin' | 'signup',
     tokenData?: Record<string, unknown>,
   ): Promise<string>;
-  sendEmailWithMagicLink(options: { email: string; requestedType: 'signin' }): Promise<unknown>;
+  sendEmailWithMagicLink(options: {
+    email: string;
+    requestedType: 'signin';
+    referrer?: string | null;
+  }): Promise<unknown>;
 }
 
 /**
@@ -50,8 +55,12 @@ export class MembersApiMagicLinks implements PurchaseMagicLinks {
     return withReferrer(link, referrer);
   }
 
-  async sendSigninEmail(email: string): Promise<void> {
-    await this.getMembersApi().sendEmailWithMagicLink({ email, requestedType: 'signin' });
+  async sendSigninEmail(email: string, referrer: string | null = null): Promise<void> {
+    await this.getMembersApi().sendEmailWithMagicLink({
+      email,
+      requestedType: 'signin',
+      referrer,
+    });
   }
 }
 

@@ -46,6 +46,7 @@ export function buildPurchase(overrides: Partial<PurchaseData> = {}): PurchaseDa
     status: 'paid',
     expiresAt: null,
     refundedAt: null,
+    revokedAt: null,
     attributionId: null,
     attributionType: null,
     attributionUrl: null,

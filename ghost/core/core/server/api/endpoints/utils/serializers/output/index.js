@@ -20,6 +20,11 @@ module.exports = {
     return require('./member-commenting');
   },
 
+  // fork(salvare): one-time purchases
+  get member_purchases() {
+    return require('./member-purchases');
+  },
+
   get members_account() {
     return require('./members-account');
   },

@@ -48,7 +48,11 @@ const MemberAddCompModal: React.FC<MemberAddCompModalProps> = ({ open, onOpenCha
   const { data: tiersData, isLoading: isLoadingTiers } = useBrowseTiers({
     searchParams: { filter: 'type:paid+active:true', limit: 'all' },
   });
-  const availablePaidTiers = tiersData?.tiers ?? [];
+  // fork(salvare): leave out tiers the member already holds. Here that means a
+  // purchased tier, which the server keeps as purchased, so a comp on it would
+  // be a silent no-op behind a success toast.
+  const heldTierIds = new Set((member.tiers ?? []).map((tier) => tier.id));
+  const availablePaidTiers = (tiersData?.tiers ?? []).filter((tier) => !heldTierIds.has(tier.id));
 
   const [selectedTierId, setSelectedTierId] = React.useState<string>('');
   const [duration, setDuration] = React.useState<CompExpiryDuration>('forever');

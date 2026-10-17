@@ -59,6 +59,20 @@ describe('MembersApiMagicLinks', function () {
     sinon.assert.calledOnceWithExactly(membersApi.sendEmailWithMagicLink, {
       email: 'member@example.com',
       requestedType: 'signin',
+      referrer: null,
+    });
+  });
+
+  it('sends a sign-in email that lands on the referrer', async function () {
+    await magicLinks.sendSigninEmail(
+      'member@example.com',
+      'https://example.com/courses/breaking-free/',
+    );
+
+    sinon.assert.calledOnceWithExactly(membersApi.sendEmailWithMagicLink, {
+      email: 'member@example.com',
+      requestedType: 'signin',
+      referrer: 'https://example.com/courses/breaking-free/',
     });
   });
 });

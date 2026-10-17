@@ -20,7 +20,10 @@ import {
 import { Inline, Stack, Text } from '@tryghost/shade/primitives';
 import { ModalPage } from '@tryghost/shade/page-templates';
 import { getHomepageUrl } from '@tryghost/admin-x-framework/api/site';
-import { getPaidActiveTiers, useBrowseTiers } from '@tryghost/admin-x-framework/api/tiers';
+import {
+  getPaidActiveSubscriptionTiers, // fork(salvare)
+  useBrowseTiers,
+} from '@tryghost/admin-x-framework/api/tiers';
 import { usePaidMembersEnabled } from '@tryghost/admin-x-framework/api/settings';
 import { useGlobalData } from '@/settings/providers/global-data-context';
 
@@ -48,7 +51,8 @@ const PortalLinks: React.FC = () => {
   const [selectedTier, setSelectedTier] = useState('');
   const { siteData } = useGlobalData();
   const { data: { tiers: allTiers } = {} } = useBrowseTiers();
-  const tiers = getPaidActiveTiers(allTiers || []);
+  // fork(salvare): purchase-only tiers have no signup links; checkout refuses a subscription on them
+  const tiers = getPaidActiveSubscriptionTiers(allTiers || []);
   const paidMembersEnabled = usePaidMembersEnabled();
 
   useEffect(() => {
@@ -123,37 +127,46 @@ const PortalLinks: React.FC = () => {
               Tiers
             </Text>
             <Stack gap="md">
-              <Field className="lg:flex-row lg:items-center lg:justify-between lg:gap-5 [&>*]:w-auto">
-                <FieldLabel className="shrink-0 whitespace-nowrap lg:w-[180px]">Tier</FieldLabel>
-                <Select value={selectedTier} onValueChange={setSelectedTier}>
-                  <SelectTrigger aria-label="Tier" className="w-fit">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {tierOptions.map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </Field>
-              <PortalLink
-                name="Signup / Monthly"
-                value={
-                  isDataAttributes
-                    ? `data-portal="signup/${selectedTier}/monthly"`
-                    : `${homePageURL}#/portal/signup/${selectedTier}/monthly`
-                }
-              />
-              <PortalLink
-                name="Signup / Yearly"
-                value={
-                  isDataAttributes
-                    ? `data-portal="signup/${selectedTier}/yearly"`
-                    : `${homePageURL}#/portal/signup/${selectedTier}/yearly`
-                }
-              />
+              {/* fork(salvare): every paid tier can be purchase-only, leaving no tier to link to */}
+              {tiers.length > 0 ? (
+                <>
+                  <Field className="lg:flex-row lg:items-center lg:justify-between lg:gap-5 [&>*]:w-auto">
+                    <FieldLabel className="shrink-0 whitespace-nowrap lg:w-[180px]">
+                      Tier
+                    </FieldLabel>
+                    <Select value={selectedTier} onValueChange={setSelectedTier}>
+                      <SelectTrigger aria-label="Tier" className="w-fit">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {tierOptions.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </Field>
+                  <PortalLink
+                    name="Signup / Monthly"
+                    value={
+                      isDataAttributes
+                        ? `data-portal="signup/${selectedTier}/monthly"`
+                        : `${homePageURL}#/portal/signup/${selectedTier}/monthly`
+                    }
+                  />
+                  <PortalLink
+                    name="Signup / Yearly"
+                    value={
+                      isDataAttributes
+                        ? `data-portal="signup/${selectedTier}/yearly"`
+                        : `${homePageURL}#/portal/signup/${selectedTier}/yearly`
+                    }
+                  />
+                </>
+              ) : (
+                <Text tone="secondary">No subscription tiers to link to.</Text>
+              )}
               <PortalLink
                 name="Signup / Free"
                 value={

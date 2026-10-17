@@ -3,7 +3,8 @@ import { z } from 'zod';
 import { DbDate } from '../../lib/db-types/date';
 import type { CamelKeys } from '../../lib/case-keys';
 
-export const PurchaseStatusSchema = z.enum(['paid', 'refunded']);
+// 'revoked': staff took the access away (Admin API). A Stripe refund can still mark it refunded later.
+export const PurchaseStatusSchema = z.enum(['paid', 'refunded', 'revoked']);
 export type PurchaseStatus = z.infer<typeof PurchaseStatusSchema>;
 
 export const PurchaseAttributionTypeSchema = z.enum(['url', 'post', 'page', 'author', 'tag']);
@@ -40,13 +41,15 @@ export const DbPurchase = z.object({
   status: PurchaseStatusSchema,
   expires_at: DbDate.nullable(),
   refunded_at: DbDate.nullable(),
+  revoked_at: DbDate.nullable(),
   ...attributionColumns,
   created_at: DbDate,
   updated_at: DbDate.nullable(),
 });
 
-// The repository owns id and timestamps. Lifecycle columns default to a paid,
-// lifetime purchase.
+// The repository owns id and updated_at, and created_at unless the caller sets
+// it (a staff grant backdated to the original order). Lifecycle columns default
+// to a paid, lifetime purchase.
 export const DbNewPurchase = DbPurchase.omit({
   id: true,
   created_at: true,
@@ -55,6 +58,8 @@ export const DbNewPurchase = DbPurchase.omit({
   status: PurchaseStatusSchema.default('paid'),
   expires_at: DbDate.nullable().default(null),
   refunded_at: DbDate.nullable().default(null),
+  revoked_at: DbDate.nullable().default(null),
+  created_at: DbDate.optional(),
 });
 
 export type PurchaseRow = z.output<typeof DbPurchase>;

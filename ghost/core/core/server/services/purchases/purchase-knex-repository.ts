@@ -8,6 +8,19 @@ import type { NewPurchaseData, PurchaseData } from './purchase-schema';
 
 const TABLE = 'members_purchases';
 
+/** The tier columns the Admin and members API purchase views show. */
+export interface PurchaseTierRow {
+  id: string;
+  name: string;
+  slug: string;
+  welcome_page_url: string | null;
+}
+
+export interface PurchaseWithTier {
+  purchase: PurchaseData;
+  tier: PurchaseTierRow;
+}
+
 export interface RepositoryTransactionOptions {
   transacting?: Knex.Transaction;
   forUpdate?: boolean;
@@ -28,9 +41,18 @@ export interface PurchaseRepository {
     productId: string,
     options?: RepositoryTransactionOptions,
   ): Promise<boolean>;
-  /** Throws DuplicatePurchaseError when the checkout session or payment intent is already recorded. */
+  getById(id: string, options?: RepositoryTransactionOptions): Promise<PurchaseData | null>;
+  /** Every row of the member, newest first (created_at, then id). */
+  browseByMember(memberId: string): Promise<PurchaseWithTier[]>;
+  /** The member's paid, unexpired rows, newest first. */
+  browseActiveByMember(memberId: string): Promise<PurchaseWithTier[]>;
+  /**
+   * created_at defaults to now. Throws DuplicatePurchaseError when the checkout
+   * session or payment intent is already recorded.
+   */
   create(data: NewPurchaseData, options?: RepositoryTransactionOptions): Promise<PurchaseData>;
   markRefunded(id: string, refundedAt: Date, options: RepositoryTransactionOptions): Promise<void>;
+  markRevoked(id: string, revokedAt: Date, options: RepositoryTransactionOptions): Promise<void>;
   transaction<T>(callback: (transacting: Knex.Transaction) => Promise<T>): Promise<T>;
 }
 
@@ -103,6 +125,40 @@ export class PurchaseKnexRepository implements PurchaseRepository {
     return this.findOne({ stripe_payment_intent_id: paymentIntentId }, options);
   }
 
+  async getById(
+    id: string,
+    options: RepositoryTransactionOptions = {},
+  ): Promise<PurchaseData | null> {
+    return this.findOne({ id }, options);
+  }
+
+  async browseByMember(memberId: string): Promise<PurchaseWithTier[]> {
+    const rows: unknown[] = await this.knex(TABLE)
+      .where({ member_id: memberId })
+      .orderBy([
+        { column: 'created_at', order: 'desc' },
+        { column: 'id', order: 'desc' },
+      ]);
+
+    return this.withTiers(rows.map((row) => decodePurchaseRow(row)));
+  }
+
+  async browseActiveByMember(memberId: string): Promise<PurchaseWithTier[]> {
+    // Same definition as getPurchaseSourcedProducts; dates compared as text on SQLite.
+    const now = toDatabaseDate(new Date());
+    const rows: unknown[] = await this.knex(TABLE)
+      .where({ member_id: memberId, status: 'paid' })
+      .andWhere((qb) => {
+        qb.whereNull('expires_at').orWhere('expires_at', '>', now);
+      })
+      .orderBy([
+        { column: 'created_at', order: 'desc' },
+        { column: 'id', order: 'desc' },
+      ]);
+
+    return this.withTiers(rows.map((row) => decodePurchaseRow(row)));
+  }
+
   async hasActivePurchase(
     memberId: string,
     productId: string,
@@ -121,10 +177,11 @@ export class PurchaseKnexRepository implements PurchaseRepository {
   ): Promise<PurchaseData> {
     const id = ObjectId().toHexString();
     const now = new Date();
+    const encoded = encodeNewPurchase(data);
     const row = {
       id,
-      ...encodeNewPurchase(data),
-      created_at: now,
+      ...encoded,
+      created_at: encoded.created_at ?? now,
       updated_at: now,
     };
 
@@ -161,6 +218,20 @@ export class PurchaseKnexRepository implements PurchaseRepository {
       });
   }
 
+  async markRevoked(
+    id: string,
+    revokedAt: Date,
+    options: RepositoryTransactionOptions,
+  ): Promise<void> {
+    await this.query(options)
+      .where({ id })
+      .update({
+        status: 'revoked',
+        revoked_at: toDatabaseDate(revokedAt),
+        updated_at: toDatabaseDate(new Date()),
+      });
+  }
+
   async transaction<T>(callback: (transacting: Knex.Transaction) => Promise<T>): Promise<T> {
     return await this.knex.transaction(callback);
   }
@@ -173,6 +244,31 @@ export class PurchaseKnexRepository implements PurchaseRepository {
     }
 
     return query;
+  }
+
+  // A second query rather than a join, so the purchase columns stay unambiguous.
+  private async withTiers(purchases: PurchaseData[]): Promise<PurchaseWithTier[]> {
+    const productIds = [...new Set(purchases.map((purchase) => purchase.productId))];
+    if (productIds.length === 0) {
+      return [];
+    }
+
+    const tiers: PurchaseTierRow[] = await this.knex('products')
+      .select('id', 'name', 'slug', 'welcome_page_url')
+      .whereIn('id', productIds);
+    const byId = new Map(tiers.map((tier) => [tier.id, tier]));
+
+    return purchases.map((purchase) => ({
+      purchase,
+      // products.id is a foreign key and tiers are never deleted; the fallback
+      // only keeps a corrupt row from failing the whole list.
+      tier: byId.get(purchase.productId) ?? {
+        id: purchase.productId,
+        name: '',
+        slug: '',
+        welcome_page_url: null,
+      },
+    }));
   }
 
   private async findOne(

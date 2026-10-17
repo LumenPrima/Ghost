@@ -24,7 +24,7 @@ import { type RetentionOffer, getRetentionOffers } from './offers-retention';
 import { SettingsModal } from '@tryghost/shade/patterns';
 import {
   type Tier,
-  getPaidActiveTiers,
+  getPaidActiveSubscriptionTiers, // fork(salvare)
   useBrowseTiers,
 } from '@tryghost/admin-x-framework/api/tiers';
 import {
@@ -358,7 +358,8 @@ export const OffersIndexModal: React.FC = () => {
     updateRoute(`offers/edit/retention/${id}`);
   };
 
-  const paidActiveTiers = getPaidActiveTiers(allTiers || []);
+  // fork(salvare): offers can't use purchase-only tiers
+  const paidActiveTiers = getPaidActiveSubscriptionTiers(allTiers || []);
 
   const filteredSignupOffers = signupOffers.filter((offer) => {
     const offerTier = allTiers?.find((tier) => tier.id === offer?.tier?.id);

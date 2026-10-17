@@ -90,7 +90,8 @@ const ZERO_DECIMAL_CURRENCIES = new Set([
   'xpf',
 ]);
 
-function formatEventAmount(amount: number, currency: string): string {
+// fork(salvare): exported for the Purchases panel (member-purchase.ts).
+export function formatEventAmount(amount: number, currency: string): string {
   const isZeroDecimal = ZERO_DECIMAL_CURRENCIES.has(currency.toLowerCase());
   const value = isZeroDecimal ? amount : amount / 100;
   // Whole amounts read better without the trailing zeros ($50, not $50.00),
@@ -178,6 +179,13 @@ function getIcon(event: RawMemberEvent): string {
   }
   if (event.type === 'email_change_event') {
     icon = 'email-changed';
+  }
+  // fork(salvare): one-time tier purchases
+  if (event.type === 'purchase_event') {
+    icon = 'purchase';
+  }
+  if (event.type === 'purchase_refunded_event' || event.type === 'purchase_revoked_event') {
+    icon = 'purchase-ended';
   }
   return `event-${icon}`;
 }
@@ -299,6 +307,27 @@ function getAction(event: RawMemberEvent, hasMultipleNewsletters: boolean): stri
   }
   if (event.type === 'gift_ended_event') {
     return 'gift subscription expired';
+  }
+  // fork(salvare): one-time tier purchases. A tier deleted since keeps the row
+  // readable through the generic name.
+  if (
+    event.type === 'purchase_event' ||
+    event.type === 'purchase_refunded_event' ||
+    event.type === 'purchase_revoked_event'
+  ) {
+    const tierName = (event.data.tier_name as string | null | undefined) || 'a tier';
+    if (event.type === 'purchase_refunded_event') {
+      return `Purchase of ${tierName} refunded`;
+    }
+    if (event.type === 'purchase_revoked_event') {
+      return `Access to ${tierName} revoked`;
+    }
+    const amount = event.data.amount as number | undefined;
+    const currency = event.data.currency as string | undefined;
+    if (typeof amount === 'number' && amount > 0 && currency) {
+      return `Purchased ${tierName} for ${formatEventAmount(amount, currency)}`;
+    }
+    return `Granted access to ${tierName}`;
   }
   return undefined;
 }

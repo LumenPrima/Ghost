@@ -154,4 +154,55 @@ describe('Unit: Helper: parse-member-event', function () {
             expect(result.icon).to.equal('event-gift');
         });
     });
+
+    // fork(salvare): one-time tier purchases
+    describe('purchase events', function () {
+        it('names the tier and the amount of a paid purchase', function () {
+            const event = buildEvent({
+                type: 'purchase_event',
+                data: {tier_name: 'Breaking Free', amount: 9900, currency: 'usd'}
+            });
+            const result = helper.compute([event]);
+            expect(result.action).to.equal('Purchased Breaking Free for $99');
+            expect(result.icon).to.equal('event-made-a-payment');
+        });
+
+        it('keeps the cents and thousands separators of a paid purchase, as the React feed does', function () {
+            const cents = helper.compute([buildEvent({
+                type: 'purchase_event',
+                data: {tier_name: 'Breaking Free', amount: 1050, currency: 'usd'}
+            })]);
+            expect(cents.action).to.equal('Purchased Breaking Free for $10.50');
+
+            const large = helper.compute([buildEvent({
+                type: 'purchase_event',
+                data: {tier_name: 'Breaking Free', amount: 125000, currency: 'eur'}
+            })]);
+            expect(large.action).to.equal('Purchased Breaking Free for €1,250');
+        });
+
+        it('reads a grant with no payment as granted access', function () {
+            const event = buildEvent({
+                type: 'purchase_event',
+                data: {tier_name: 'Breaking Free', amount: 0, currency: 'usd'}
+            });
+            const result = helper.compute([event]);
+            expect(result.action).to.equal('Granted access to Breaking Free');
+        });
+
+        it('names the tier of a refund and a revoke', function () {
+            const refunded = helper.compute([buildEvent({type: 'purchase_refunded_event', data: {tier_name: 'Breaking Free'}})]);
+            expect(refunded.action).to.equal('Purchase of Breaking Free refunded');
+            expect(refunded.icon).to.equal('event-canceled-subscription');
+
+            const revoked = helper.compute([buildEvent({type: 'purchase_revoked_event', data: {tier_name: 'Breaking Free'}})]);
+            expect(revoked.action).to.equal('Access to Breaking Free revoked');
+            expect(revoked.icon).to.equal('event-canceled-subscription');
+        });
+
+        it('falls back to a generic tier name when the tier was deleted', function () {
+            const result = helper.compute([buildEvent({type: 'purchase_revoked_event', data: {tier_name: null}})]);
+            expect(result.action).to.equal('Access to a tier revoked');
+        });
+    });
 });

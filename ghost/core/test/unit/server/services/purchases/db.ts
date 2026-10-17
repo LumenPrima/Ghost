@@ -5,9 +5,15 @@ import createKnex, { type Knex } from 'knex';
 export async function createPurchaseTables(knex: Knex): Promise<void> {
   await knex.schema.createTable('members', (table) => {
     table.string('id', 24).primary();
+    table.string('uuid', 36).nullable();
+    table.string('name', 191).nullable();
+    table.string('email', 191).nullable();
   });
   await knex.schema.createTable('products', (table) => {
     table.string('id', 24).primary();
+    table.string('name', 191).nullable();
+    table.string('slug', 191).nullable();
+    table.string('welcome_page_url', 2000).nullable();
   });
   await knex.schema.createTable('members_purchases', (table) => {
     table.string('id', 24).primary();
@@ -21,6 +27,7 @@ export async function createPurchaseTables(knex: Knex): Promise<void> {
     table.string('status', 50).notNullable().defaultTo('paid');
     table.dateTime('expires_at').nullable();
     table.dateTime('refunded_at').nullable();
+    table.dateTime('revoked_at').nullable();
     table.string('attribution_id', 24).nullable();
     table.string('attribution_type', 50).nullable();
     table.string('attribution_url', 2000).nullable();

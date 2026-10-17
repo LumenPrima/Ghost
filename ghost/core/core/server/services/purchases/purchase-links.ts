@@ -1,5 +1,9 @@
 import type { Knex } from 'knex';
 import { fromDatabaseDate, toDatabaseDate } from '../../lib/db-types/date';
+import type { GetPurchaseSourcedProductIdsForMembers } from './purchase-views';
+
+// Keeps each IN list well under SQLite's bound-parameter limit.
+const MEMBER_ID_CHUNK_SIZE = 500;
 
 export interface PurchaseSourcedProduct {
   id: string;
@@ -61,3 +65,41 @@ export async function getPurchaseSourcedProducts(
 
   return [...byProduct].map(([id, expiry]) => ({ id, expiry_at: expiry }));
 }
+
+/**
+ * Batched form of getPurchaseSourcedProducts, with the same definition of an
+ * active purchase. Returns product ids only. Members with no active purchase are
+ * absent from the map; an empty memberIds runs no query.
+ */
+export const getPurchaseSourcedProductIdsForMembers: GetPurchaseSourcedProductIdsForMembers =
+  async (knex, memberIds, options = {}) => {
+    const byMember = new Map<string, Set<string>>();
+    const ids = [...new Set(memberIds.filter(Boolean))];
+    if (ids.length === 0) {
+      return byMember;
+    }
+
+    const now = toDatabaseDate(new Date());
+    for (let start = 0; start < ids.length; start += MEMBER_ID_CHUNK_SIZE) {
+      const query = knex('members_purchases')
+        .distinct('member_id', 'product_id')
+        .whereIn('member_id', ids.slice(start, start + MEMBER_ID_CHUNK_SIZE))
+        .andWhere({ status: 'paid' })
+        .andWhere((qb) => {
+          qb.whereNull('expires_at').orWhere('expires_at', '>', now);
+        });
+
+      if (options.transacting) {
+        query.transacting(options.transacting);
+      }
+
+      const rows: Array<{ member_id: string; product_id: string }> = await query;
+      for (const row of rows) {
+        const products = byMember.get(row.member_id) ?? new Set<string>();
+        products.add(row.product_id);
+        byMember.set(row.member_id, products);
+      }
+    }
+
+    return byMember;
+  };

@@ -13,7 +13,15 @@ export interface PurchaseAccessEmailData {
     isNewMember: boolean;
     accessUrl: string;
     amount: string;
+    // A staff grant rather than a payment.
+    granted: boolean;
   };
+}
+
+export function getSubject(data: PurchaseAccessEmailData): string {
+  return data.purchase.granted
+    ? `You've been given access to ${data.purchase.tierName}`
+    : `You now have access to ${data.purchase.tierName}`;
 }
 
 export function renderText(data: PurchaseAccessEmailData): string {
@@ -21,10 +29,12 @@ export function renderText(data: PurchaseAccessEmailData): string {
     ? `\n\nWe've created a ${data.siteTitle} account for ${data.toEmail}.`
     : '';
 
-  // Whitespace is visible in plain-text email, so this stays unindented.
-  return `You now have access to ${data.purchase.tierName}
+  const thanks = data.purchase.granted
+    ? ''
+    : `\n\nThank you for your purchase of ${data.purchase.tierName} (${data.purchase.amount}).`;
 
-Thank you for your purchase of ${data.purchase.tierName} (${data.purchase.amount}).${newMemberSentence}
+  // Whitespace is visible in plain-text email, so this stays unindented.
+  return `${getSubject(data)}${thanks}${newMemberSentence}
 
 Use this link to sign in and start:
 

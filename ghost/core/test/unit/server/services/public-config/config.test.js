@@ -25,6 +25,7 @@ const allowedKeys = [
   'pintura',
   'signupForm',
   'security',
+  'salvare', // fork(salvare)
 ];
 
 describe('Public-config Service', function () {
@@ -44,6 +45,13 @@ describe('Public-config Service', function () {
       const configProperties = getConfigProperties();
 
       assert.deepEqual(Object.keys(configProperties), allowedKeys);
+    });
+
+    // fork(salvare)
+    it('should advertise the Salvare purchases capability', function () {
+      const configProperties = getConfigProperties();
+
+      assert.deepEqual(configProperties.salvare, { purchases: true });
     });
 
     it('should return GHOST_BUILD_VERSION as version when set', function () {

@@ -286,6 +286,13 @@ function createApiInstance(config) {
           memberId,
           options,
         ),
+      // Batched for member lists (BREAD): Map<memberId, Set<productId>>
+      getPurchaseSourcedProductIdsForMembers: (memberIds, options) =>
+        require('../purchases/purchase-links').getPurchaseSourcedProductIdsForMembers(
+          db.knex,
+          memberIds,
+          options,
+        ),
     },
     purchaseService,
   });

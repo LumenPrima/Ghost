@@ -834,10 +834,12 @@ module.exports = {
       maxlength: 50,
       nullable: false,
       defaultTo: 'paid',
-      validations: { isIn: [['paid', 'refunded']] },
+      validations: { isIn: [['paid', 'refunded', 'revoked']] },
     },
     expires_at: { type: 'dateTime', nullable: true },
     refunded_at: { type: 'dateTime', nullable: true },
+    // staff took the access away (Admin API revoke); the payment, if any, is not refunded
+    revoked_at: { type: 'dateTime', nullable: true },
     // attribution values from ghost-history (member attribution tracking script)
     attribution_id: { type: 'string', maxlength: 24, nullable: true },
     attribution_type: {

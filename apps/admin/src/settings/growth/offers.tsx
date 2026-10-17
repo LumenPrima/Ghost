@@ -2,7 +2,10 @@ import React from 'react';
 import TopLevelGroup from '@/settings/components/top-level-group';
 import { Button } from '@tryghost/shade/components';
 import { checkStripeEnabled } from '@tryghost/admin-x-framework/api/settings';
-import { getPaidActiveTiers, useBrowseTiers } from '@tryghost/admin-x-framework/api/tiers';
+import {
+  getPaidActiveSubscriptionTiers, // fork(salvare)
+  useBrowseTiers,
+} from '@tryghost/admin-x-framework/api/tiers';
 import { useBrowseOffers } from '@tryghost/admin-x-framework/api/offers';
 import { useGlobalData } from '@/settings/providers/global-data-context';
 import { useSettingsNavigation } from '@/settings/hooks/use-settings-navigation';
@@ -15,7 +18,8 @@ const Offers: React.FC<{ keywords: string[] }> = ({ keywords }) => {
   const { data: { offers: allOffers = [] } = {} } = useBrowseOffers();
 
   const { data: { tiers: allTiers } = {} } = useBrowseTiers();
-  const paidActiveTiers = getPaidActiveTiers(allTiers || []);
+  // fork(salvare): offers can't use purchase-only tiers
+  const paidActiveTiers = getPaidActiveSubscriptionTiers(allTiers || []);
 
   const signupOffers = allOffers.filter((offer) => offer.redemption_type === 'signup');
 

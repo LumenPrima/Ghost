@@ -167,7 +167,11 @@ const Tiers: React.FC<{ keywords: string[] }> = ({ keywords }) => {
   };
 
   const sortTiers = (t: Tier[]) => {
-    return [...t].sort((a, b) => (a.monthly_price ?? 0) - (b.monthly_price ?? 0));
+    // fork(salvare): purchase-only tiers sort by their one-time price
+    return [...t].sort(
+      (a, b) =>
+        (a.one_time_price ?? a.monthly_price ?? 0) - (b.one_time_price ?? b.monthly_price ?? 0),
+    );
   };
 
   const saveMachinePaymentSettings = (updates: Setting[]) => {

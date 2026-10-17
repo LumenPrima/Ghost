@@ -2,7 +2,7 @@ import React from 'react';
 import clsx from 'clsx';
 import { LucideIcon } from '@tryghost/shade/utils';
 import { NoValueLabel, NoValueLabelIcon } from '@tryghost/shade/components';
-import { type Tier } from '@tryghost/admin-x-framework/api/tiers';
+import { type Tier, isPurchaseOnlyTier } from '@tryghost/admin-x-framework/api/tiers'; // fork(salvare)
 import { TrialDaysLabel } from './tier-detail-preview';
 import { currencyToDecimal, getSymbol } from '@tryghost/admin-x-framework';
 import { formatNumber } from '@tryghost/shade/utils';
@@ -25,6 +25,9 @@ const TierCard: React.FC<TierCardProps> = ({ tier }) => {
   const { updateRoute } = useSettingsNavigation();
   const currency = tier?.currency || 'USD';
   const currencySymbol = currency ? getSymbol(currency) : '$';
+  // fork(salvare): a purchase-only tier shows its one-time price, not the placeholder monthly one
+  const isOneTime = isPurchaseOnlyTier(tier);
+  const cardPrice = isOneTime ? (tier.one_time_price ?? 0) : tier.monthly_price || 0;
 
   return (
     <div className={cardContainerClasses} data-testid="tier-card" data-tier={tier.slug}>
@@ -42,13 +45,17 @@ const TierCard: React.FC<TierCardProps> = ({ tier }) => {
             {currencySymbol}
           </span>
           <span className="text-xl font-bold tracking-tighter">
-            {formatNumber(currencyToDecimal(tier.monthly_price || 0), { maximumFractionDigits: 2 })}
+            {/* fork(salvare) */}
+            {formatNumber(currencyToDecimal(cardPrice), { maximumFractionDigits: 2 })}
           </span>
-          {tier.monthly_price && tier.monthly_price > 0 && (
+          {/* fork(salvare) */}
+          {isOneTime && <span className="ml-1 text-muted-foreground">one-time</span>}
+          {!isOneTime && tier.monthly_price && tier.monthly_price > 0 && (
             <span className="text-gray-700">/month</span>
           )}
         </div>
-        {tier.trial_days ? (
+        {/* fork(salvare): a one-time purchase has no trial */}
+        {tier.trial_days && !isOneTime ? (
           <div className="mt-1 mb-4">
             <TrialDaysLabel size="sm" trialDays={tier.trial_days} />
           </div>

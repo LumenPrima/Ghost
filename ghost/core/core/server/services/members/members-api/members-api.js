@@ -22,6 +22,7 @@ const { EmailSuppressedEvent } = require('../../email-suppression-list/email-sup
 const MagicLink = require('../../lib/magic-link/magic-link');
 const DomainEvents = require('@tryghost/domain-events');
 const automationsApi = require('../../automations/automations-api');
+const { emptyPurchaseEventPage } = require('../../purchases/purchase-views'); // fork(salvare)
 
 module.exports = function MembersAPI({
   tokenConfig: { issuer, privateKey, publicKey },
@@ -133,6 +134,14 @@ module.exports = function MembersAPI({
     MemberEmailChangeEvent,
     AutomatedEmailRecipient,
     giftSubscriptions: giftService,
+    // fork(salvare): purchase rows in the activity feed. The service is read lazily, like
+    // gifts; until it exists every purchase list is an empty page, never null.
+    purchaseEvents: {
+      browse: (type, options, filter) =>
+        purchaseService?.service
+          ? purchaseService.service.browseEvents(type, options, filter)
+          : emptyPurchaseEventPage(),
+    },
   });
 
   const nextPaymentCalculator = new NextPaymentCalculator();
@@ -160,6 +169,7 @@ module.exports = function MembersAPI({
     giftService,
     metafieldValues,
     metafieldDefinitions,
+    purchaseLinks, // fork(salvare)
   });
 
   const geolocationService = new GeolocationService();
@@ -411,6 +421,18 @@ module.exports = function MembersAPI({
           .filter(Boolean),
       ),
     ];
+
+    // fork(salvare): tiers bought outright are entitlements too. Only ids the member is
+    // actually linked to count, so the token never claims what content gating refuses.
+    if (purchaseLinks) {
+      const linkedTierIds = new Set((member.products || []).map((product) => product.id));
+      const purchased = await purchaseLinks.getPurchaseSourcedProducts(member.id);
+      for (const { id } of purchased) {
+        if (linkedTierIds.has(id) && !activeTierIds.includes(id)) {
+          activeTierIds.push(id);
+        }
+      }
+    }
 
     return tokenService.encodeEntitlementToken({
       sub: member.email,

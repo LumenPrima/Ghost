@@ -4,6 +4,7 @@ import MemberCustomFieldsField from './member-custom-fields-field';
 import MemberDetailForm from './member-detail-form';
 import MemberDetailSidebar from './member-detail-sidebar';
 import MemberNewslettersField from './member-newsletters-field';
+import MemberPurchasesSection from './member-purchases-section'; // fork(salvare)
 import MemberSubscriptionsSection from './member-subscriptions-section';
 import React from 'react';
 import {
@@ -506,6 +507,10 @@ const MemberDetailPage: React.FC<MemberDetailPageProps> = ({
                       <MemberSubscriptionsSection canAddComp={canAddComp} member={member} />
                     </section>
                   )}
+
+                  {/* fork(salvare): one-time purchases. The section renders only
+                                    against a backend that supports them, Stripe or not. */}
+                  {member && <MemberPurchasesSection member={member} />}
 
                   {/* Recent activity feed — Ember `activity-feed.hbs` shows the top
                                     5 events for a saved member, and switches to a "no events yet"

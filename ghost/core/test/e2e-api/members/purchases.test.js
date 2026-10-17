@@ -11,53 +11,33 @@ const {
 const { stripeMocker } = require('../../utils/e2e-framework-mock-manager');
 const models = require('../../../core/server/models');
 const db = require('../../../core/server/data/db');
-const mailService = require('../../../core/server/services/mail');
 const membersService = require('../../../core/server/services/members');
 const tiersService = require('../../../core/server/services/tiers');
 const giftService = require('../../../core/server/services/gifts');
 const purchasesModule = require('../../../core/server/services/purchases');
 const urlServiceUtils = require('../../utils/url-service-utils');
+const urlUtils = require('../../../core/shared/url-utils').default;
+const purchaseHelpers = require('../../utils/purchase-helpers');
 
-const COURSE_PRICE = 9900;
+const {
+  COURSE_PRICE,
+  next,
+  getLatestCheckoutSession,
+  accessEmailsTo,
+  staffPurchaseEmails,
+  getMember,
+  productIds,
+  getMemberProductRows,
+  getPurchases,
+  getProductEvents,
+  buildCompletedEvent,
+  sendWebhook,
+  sendRefund,
+} = purchaseHelpers;
 
 let membersAgent, adminAgent;
 let courseTier; // Admin API JSON of the purchase-only tier
 let libraryProduct; // the fixture's paid tier, sold as a subscription
-let sequence = 0;
-
-function next() {
-  sequence += 1;
-  return sequence;
-}
-
-function getLatestCheckoutSession() {
-  return stripeMocker.checkoutSessions[stripeMocker.checkoutSessions.length - 1];
-}
-
-// The mocker's qs decoder coerces metadata values; Stripe always sends strings.
-function toWebhookMetadata(metadata) {
-  const result = {};
-
-  for (const [key, value] of Object.entries(metadata)) {
-    result[key] = String(value);
-  }
-
-  return result;
-}
-
-function sentEmails() {
-  return mailService.GhostMailer.prototype.sendMail.getCalls().map((call) => call.args[0]);
-}
-
-function accessEmailsTo(email) {
-  return sentEmails().filter(
-    (mail) => mail.to === email && /^You now have access to /.test(mail.subject),
-  );
-}
-
-function staffPurchaseEmails() {
-  return sentEmails().filter((mail) => /Purchase: /.test(mail.subject ?? ''));
-}
 
 async function getPostUrl() {
   const post = await models.Post.where('id', fixtureManager.get('posts', 0).id).fetch({
@@ -66,168 +46,34 @@ async function getPostUrl() {
   return { post, url: urlServiceUtils.urlFor(post, 'posts', { absolute: false }) };
 }
 
-async function getMember(email) {
-  return await models.Member.findOne(
-    { email },
-    { require: true, withRelated: ['products', 'stripeCustomers'] },
+// The shared helpers, bound to this suite's agents and course tier.
+async function startCheckout(body, expectedStatus = 200) {
+  return await purchaseHelpers.startCheckout(
+    membersAgent,
+    { tierId: courseTier.id, ...body },
+    expectedStatus,
   );
 }
 
-function productIds(member) {
-  return member
-    .related('products')
-    .models.map((product) => product.id)
-    .sort();
-}
-
-async function getMemberProductRows(memberId) {
-  return await db.knex('members_products').where({ member_id: memberId });
-}
-
-async function getPurchases(filter) {
-  return await db.knex('members_purchases').where(filter);
-}
-
-async function getProductEvents(memberId, productId) {
-  return await db
-    .knex('members_product_events')
-    .where({ member_id: memberId, product_id: productId })
-    // created_at has 1 s resolution; the ObjectId id breaks ties in insertion order
-    .orderBy([
-      { column: 'created_at', order: 'asc' },
-      { column: 'id', order: 'asc' },
-    ]);
-}
-
-async function startCheckout(body, expectedStatus = 200) {
-  return await membersAgent
-    .post('/api/create-stripe-checkout-session/')
-    .body({
-      type: 'purchase',
-      tierId: courseTier.id,
-      metadata: {},
-      ...body,
-    })
-    .expectStatus(expectedStatus);
-}
-
-function buildCompletedEvent(
-  checkoutSession,
-  { email, name = 'Course Buyer', customer, paymentIntent, ...overrides },
-  type = 'checkout.session.completed',
-) {
-  return {
-    type,
-    data: {
-      object: {
-        id: checkoutSession.id,
-        mode: 'payment',
-        payment_status: 'paid',
-        amount_total: COURSE_PRICE,
-        currency: 'usd',
-        customer: customer ?? checkoutSession.customer ?? null,
-        customer_details: { email, name },
-        payment_intent: paymentIntent,
-        metadata: toWebhookMetadata(checkoutSession.metadata),
-        ...overrides,
-      },
-    },
-  };
-}
-
-async function sendWebhook(event) {
-  await stripeMocker.sendWebhook(event);
-  await DomainEvents.allSettled();
-}
-
-async function sendRefund(paymentIntent, { refunded = true } = {}) {
-  await sendWebhook({
-    type: 'charge.refunded',
-    data: {
-      object: {
-        id: `ch_${paymentIntent}`,
-        payment_intent: paymentIntent,
-        refunded,
-        invoice: `in_${paymentIntent}`,
-      },
-    },
+async function purchaseAsGuest(email, { paymentIntent, customer } = {}) {
+  return await purchaseHelpers.purchaseAsGuest(membersAgent, {
+    tierId: courseTier.id,
+    email,
+    paymentIntent,
+    customer,
   });
 }
 
-/**
- * Runs an anonymous checkout plus its paid webhook for `email`.
- * @returns {Promise<{checkoutSession: any, paymentIntent: string, customer: string, member: any}>}
- */
-async function purchaseAsGuest(email, { paymentIntent, customer } = {}) {
-  const n = next();
-  paymentIntent = paymentIntent ?? `pi_purchase_${n}`;
-  customer = customer ?? `cus_purchase_${n}`;
-
-  await startCheckout({ customerEmail: email });
-  const checkoutSession = getLatestCheckoutSession();
-
-  await sendWebhook(buildCompletedEvent(checkoutSession, { email, customer, paymentIntent }));
-
-  return { checkoutSession, paymentIntent, customer, member: await getMember(email) };
-}
-
-/**
- * Runs a signed-in checkout plus its paid webhook for an existing member.
- * @returns {Promise<{checkoutSession: any, paymentIntent: string, member: any}>}
- */
 async function purchaseAsMember(email) {
-  const n = next();
-  const paymentIntent = `pi_purchase_${n}`;
-  const existing = await getMember(email);
-  const identity = await membersService.api.getMemberIdentityToken(existing.get('transient_id'));
-
-  await startCheckout({ identity });
-  const checkoutSession = getLatestCheckoutSession();
-
-  await sendWebhook(
-    buildCompletedEvent(checkoutSession, {
-      email,
-      customer: `cus_purchase_${n}`,
-      paymentIntent,
-    }),
-  );
-
-  return { checkoutSession, paymentIntent, member: await getMember(email) };
+  return await purchaseHelpers.purchaseAsMember(membersAgent, { tierId: courseTier.id, email });
 }
 
 async function createCourseTier() {
-  const { body } = await adminAgent
-    .post('/tiers/')
-    .body({
-      tiers: [
-        {
-          name: 'Breaking Free',
-          type: 'paid',
-          currency: 'usd',
-          monthly_price: 500,
-          yearly_price: 5000,
-          visibility: 'none',
-          one_time_price: COURSE_PRICE,
-        },
-      ],
-    })
-    .expectStatus(201);
-
-  await DomainEvents.allSettled();
-
-  return body.tiers[0];
+  return await purchaseHelpers.createCourseTier(adminAgent);
 }
 
 async function createLibrarySubscriber(email) {
-  const member = await membersService.api.members.create({ email, name: 'Library Subscriber' });
-  const customer = stripeMocker.createCustomer({ email });
-  const price = await stripeMocker.getPriceForTier(libraryProduct.get('slug'), 'month');
-  const subscription = await stripeMocker.createSubscription({ customer, price });
-  await DomainEvents.allSettled();
-
-  const identity = await membersService.api.getMemberIdentityToken(member.get('transient_id'));
-
-  return { member, customer, subscription, identity };
+  return await purchaseHelpers.createSubscriber(email, libraryProduct.get('slug'));
 }
 
 describe('One-time tier purchases', function () {
@@ -557,16 +403,21 @@ describe('One-time tier purchases', function () {
     await membersService.api.members.create({ email, name: 'Existing Member' });
     await DomainEvents.allSettled();
     const sessionsBefore = stripeMocker.checkoutSessions.length;
+    // The page that started checkout: the sign-in link brings the member back to it
+    const cancelUrl = new URL('courses/breaking-free/', urlUtils.urlFor('home', true)).href;
 
     // The padded variants miss the router's raw-string lookup; the service resolves the member
     // from the trimmed email, so none of them can mint a signup link for this account
     for (const customerEmail of [email, ` ${email}`, `\t${email}`, `${email} `]) {
-      const { body } = await startCheckout({ customerEmail }, 403);
+      const { body } = await startCheckout({ customerEmail, cancelUrl }, 403);
       assert.equal(body.errors[0].code, 'PURCHASE_SIGNIN_REQUIRED');
     }
 
     assert.equal(stripeMocker.checkoutSessions.length, sessionsBefore);
-    await mockManager.assert.sentEmailEventually({ to: email, subject: /sign in/i });
+    const mail = await mockManager.assert.sentEmailEventually({ to: email, subject: /sign in/i });
+    const magicLink = (mail.text ?? '').match(/https?:\/\/\S+token=\S+/)?.[0];
+    assert.ok(magicLink, 'expected a magic link in the sign-in email');
+    assert.equal(new URL(magicLink).searchParams.get('r'), cancelUrl);
   });
 
   it('5b. grants the course to a member who signed up after a guest checkout, without attaching the guest customer', async function () {

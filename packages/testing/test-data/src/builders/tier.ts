@@ -16,6 +16,8 @@ export interface Tier {
   currency?: string;
   monthly_price?: number;
   yearly_price?: number;
+  /** fork(salvare): set on tiers sold as a one-time purchase. Absent by default, as Core omits null. */
+  one_time_price?: number | null;
   benefits: string[];
   created_at: string;
   updated_at: string;

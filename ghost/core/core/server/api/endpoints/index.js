@@ -329,6 +329,15 @@ module.exports = {
     return apiFramework.pipeline(require('./progress-members'), localUtils, 'members');
   },
 
+  // fork(salvare): one-time purchases (Admin API, then members API)
+  get memberPurchases() {
+    return apiFramework.pipeline(require('./member-purchases'), localUtils);
+  },
+
+  get purchasesMembers() {
+    return apiFramework.pipeline(require('./purchases-members'), localUtils, 'members');
+  },
+
   get giftLinks() {
     return apiFramework.pipeline(require('./gift-links'), localUtils);
   },

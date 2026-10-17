@@ -532,6 +532,7 @@ describe('MemberBreadService', function () {
         giftService: options.giftService || defaultGiftService,
         metafieldValues: options.metafieldValues || defaultMetafieldValues,
         metafieldDefinitions: options.metafieldDefinitions || createMetafieldDefinitionsStub(),
+        purchaseLinks: options.purchaseLinks, // fork(salvare)
       });
     };
 
@@ -977,6 +978,110 @@ describe('MemberBreadService', function () {
       sinon.assert.notCalled(giftServiceStub.service.getMemberPresentations);
     });
 
+    // fork(salvare): tiers bought outright get no synthetic Complimentary or Gift row
+    describe('purchased tiers', function () {
+      const COMP_TIER = { id: 'tier_library', currency: 'usd', expiry_at: null };
+      const COURSE_TIER = { id: 'tier_course', currency: 'usd', expiry_at: null };
+
+      const purchaseLinksFor = (productIds) => ({
+        getPurchaseSourcedProductIdsForMembers: sinon
+          .stub()
+          .resolves(new Map([[MEMBER_ID, new Set(productIds)]])),
+      });
+
+      const setMember = (status, products) => {
+        memberModelStub.status = status;
+        memberModelStub.toJSON.returns({
+          ...memberModelJSON,
+          status,
+          subscriptions: [],
+          products,
+          productEvents: [],
+        });
+        memberRepositoryStub.isActiveSubscriptionStatus = sinon.stub().returns(true);
+      };
+
+      it("leaves a purchased tier out of a comped member's synthetic rows", async function () {
+        setMember('comped', [COMP_TIER, COURSE_TIER]);
+        const purchaseLinks = purchaseLinksFor([COURSE_TIER.id]);
+
+        const member = await getService({ purchaseLinks }).read({ id: MEMBER_ID });
+
+        sinon.assert.calledOnceWithExactly(purchaseLinks.getPurchaseSourcedProductIdsForMembers, [
+          MEMBER_ID,
+        ]);
+        assert.deepEqual(
+          member.subscriptions.map((sub) => [sub.tier.id, sub.plan.nickname]),
+          [[COMP_TIER.id, 'Complimentary']],
+        );
+      });
+
+      it('keeps the rows of a comped member whose only tiers are purchased', async function () {
+        setMember('comped', [COURSE_TIER]);
+
+        const member = await getService({
+          purchaseLinks: purchaseLinksFor([COURSE_TIER.id]),
+        }).read({ id: MEMBER_ID });
+
+        assert.deepEqual(
+          member.subscriptions.map((sub) => [sub.tier.id, sub.plan.nickname]),
+          [[COURSE_TIER.id, 'Complimentary']],
+        );
+      });
+
+      it('keeps the Gift row when the gift tier is also purchased', async function () {
+        setMember('gift', [COURSE_TIER]);
+
+        const member = await getService({
+          purchaseLinks: purchaseLinksFor([COURSE_TIER.id]),
+        }).read({ id: MEMBER_ID });
+
+        assert.deepEqual(
+          member.subscriptions.map((sub) => [sub.tier.id, sub.plan.nickname]),
+          [[COURSE_TIER.id, 'Gift subscription']],
+        );
+      });
+
+      it("leaves a purchased tier out of a gift member's rows when the gift is on another tier", async function () {
+        setMember('gift', [COMP_TIER, COURSE_TIER]);
+
+        const member = await getService({
+          purchaseLinks: purchaseLinksFor([COURSE_TIER.id]),
+        }).read({ id: MEMBER_ID });
+
+        assert.deepEqual(
+          member.subscriptions.map((sub) => [sub.tier.id, sub.plan.nickname]),
+          [[COMP_TIER.id, 'Gift subscription']],
+        );
+      });
+
+      for (const status of ['free', 'paid']) {
+        it(`runs no purchase query for a ${status} member`, async function () {
+          setMember(status, [COURSE_TIER]);
+          const purchaseLinks = purchaseLinksFor([COURSE_TIER.id]);
+
+          const member = await getService({ purchaseLinks }).read({ id: MEMBER_ID });
+
+          sinon.assert.notCalled(purchaseLinks.getPurchaseSourcedProductIdsForMembers);
+          assert.deepEqual(member.subscriptions, []);
+        });
+      }
+
+      it('falls back to the upstream rows when the purchase lookup fails', async function () {
+        setMember('comped', [COMP_TIER, COURSE_TIER]);
+        const purchaseLinks = {
+          getPurchaseSourcedProductIdsForMembers: sinon.stub().rejects(new Error('db down')),
+        };
+
+        const member = await getService({ purchaseLinks }).read({ id: MEMBER_ID });
+
+        assert.deepEqual(
+          member.subscriptions.map((sub) => sub.tier.id),
+          [COMP_TIER.id, COURSE_TIER.id],
+        );
+      });
+    });
+
     it('returns a member with attribution data', async function () {
       const attributionData = {
         url: 'https://example.com',
@@ -1295,6 +1400,75 @@ describe('MemberBreadService', function () {
       assert.equal(member.subscriptions.length, 1);
       assert.equal(member.subscriptions[0].offer, null);
       assert.deepEqual(member.subscriptions[0].offer_redemptions, []);
+    });
+  });
+
+  // fork(salvare): browse looks purchased tiers up once per page
+  describe('browse purchased tiers', function () {
+    it('batches the purchase lookup for the comped and gift members of a page', async function () {
+      const makeModel = (id, status, products) => ({
+        id,
+        get: (key) => ({ id, status, email: `${id}@example.com`, email_disabled: false })[key],
+        related: sinon.stub().returns([]),
+        toJSON: sinon.stub().returns({
+          id,
+          uuid: `uuid-${id}`,
+          email: `${id}@example.com`,
+          name: id,
+          status,
+          subscriptions: [],
+          products,
+          productEvents: [],
+        }),
+      });
+      const library = { id: 'tier_library', expiry_at: null };
+      const course = { id: 'tier_course', expiry_at: null };
+      const models = [
+        makeModel('m_comped', 'comped', [library, course]),
+        makeModel('m_free', 'free', [course]),
+        makeModel('m_gift', 'gift', [course]),
+      ];
+      const purchaseLinks = {
+        getPurchaseSourcedProductIdsForMembers: sinon.stub().resolves(
+          new Map([
+            ['m_comped', new Set([course.id])],
+            ['m_gift', new Set([course.id])],
+          ]),
+        ),
+      };
+
+      const service = new MemberBreadService({
+        memberRepository: {
+          list: sinon.stub().resolves({ data: models, meta: {} }),
+          isActiveSubscriptionStatus: sinon.stub().returns(true),
+        },
+        offersAPI: {
+          getOffer: sinon.stub().resolves(null),
+          getRedeemedOfferIdsForSubscriptions: sinon.stub().resolves([]),
+        },
+        giftService: { service: { getMemberPresentations: sinon.stub().resolves(new Map()) } },
+        emailSuppressionList: {
+          getBulkSuppressionData: sinon
+            .stub()
+            .resolves(models.map(() => ({ suppressed: false, info: null }))),
+        },
+        settingsHelpers: { createUnsubscribeUrl: sinon.stub().returns('https://example.com/u') },
+        nextPaymentCalculator: new NextPaymentCalculator(),
+        metafieldValues: createMetafieldValuesStub(),
+        metafieldDefinitions: createMetafieldDefinitionsStub(),
+        purchaseLinks,
+      });
+
+      const page = await service.browse({ withRelated: ['products'] });
+
+      sinon.assert.calledOnceWithExactly(purchaseLinks.getPurchaseSourcedProductIdsForMembers, [
+        'm_comped',
+        'm_gift',
+      ]);
+      assert.deepEqual(
+        page.data.map((member) => member.subscriptions.map((sub) => sub.tier.id)),
+        [[library.id], [], [course.id]],
+      );
     });
   });
 });

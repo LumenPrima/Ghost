@@ -26,6 +26,7 @@ module.exports = {
       'exploreTestimonialsUrl',
       'featurebase',
       'docsbot',
+      'salvare', // fork(salvare): capability flags (services/public-config/config.js)
     ];
 
     frame.response = {

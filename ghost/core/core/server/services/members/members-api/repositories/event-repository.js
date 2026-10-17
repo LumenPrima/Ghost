@@ -44,6 +44,7 @@ module.exports = class EventRepository {
     MemberEmailChangeEvent,
     AutomatedEmailRecipient,
     giftSubscriptions,
+    purchaseEvents, // fork(salvare)
   }) {
     this._DonationPaymentEvent = DonationPaymentEvent;
     this._MemberSubscribeEvent = MemberSubscribeEvent;
@@ -62,6 +63,8 @@ module.exports = class EventRepository {
     this._MemberEmailChangeEvent = MemberEmailChangeEvent;
     this._AutomatedEmailRecipient = AutomatedEmailRecipient;
     this._giftSubscriptions = giftSubscriptions;
+    /** fork(salvare): `{browse(type, options, filter)}` over members_purchases; see services/purchases/README.md */
+    this._purchaseEvents = purchaseEvents;
     this._knex = db.knex;
   }
 
@@ -102,6 +105,10 @@ module.exports = class EventRepository {
         { type: 'gift_purchase_event', action: 'getGiftPurchaseEvents' },
         { type: 'gift_redemption_event', action: 'getGiftRedemptionEvents' },
         { type: 'gift_ended_event', action: 'getGiftEndedEvents' },
+        // fork(salvare): one-time purchases, staff grants, refunds and revokes
+        { type: 'purchase_event', action: 'getPurchaseEvents' },
+        { type: 'purchase_refunded_event', action: 'getPurchaseRefundedEvents' },
+        { type: 'purchase_revoked_event', action: 'getPurchaseRevokedEvents' },
       );
 
       if (this._AutomatedEmailRecipient) {
@@ -159,6 +166,11 @@ module.exports = class EventRepository {
             subscription_event: 1,
             gift_redemption_event: 1,
             gift_ended_event: 1,
+            // fork(salvare): a guest's same-second signup sorts below the purchase, and a
+            // same-second refund or revoke above it
+            purchase_refunded_event: 0,
+            purchase_revoked_event: 0,
+            purchase_event: 1,
             newsletter_event: 2,
             signup_event: 3,
           };
@@ -509,6 +521,27 @@ module.exports = class EventRepository {
 
   async getGiftRedemptionEvents(options = {}, filter) {
     return this._giftSubscriptions.service.browseRedemptionEvents(options, filter);
+  }
+
+  // fork(salvare): one-time purchases. Each list is an empty page while the purchases
+  // service is absent, so the merged timeline never sees a null page.
+  async getPurchaseEvents(options = {}, filter) {
+    return this.#browsePurchaseEvents('purchase_event', options, filter);
+  }
+
+  async getPurchaseRefundedEvents(options = {}, filter) {
+    return this.#browsePurchaseEvents('purchase_refunded_event', options, filter);
+  }
+
+  async getPurchaseRevokedEvents(options = {}, filter) {
+    return this.#browsePurchaseEvents('purchase_revoked_event', options, filter);
+  }
+
+  async #browsePurchaseEvents(type, options, filter) {
+    const page = this._purchaseEvents
+      ? await this._purchaseEvents.browse(type, options, filter)
+      : null;
+    return page ?? { data: [], meta: { pagination: { total: 0 } } };
   }
 
   async getGiftEndedEvents(options = {}, filter) {

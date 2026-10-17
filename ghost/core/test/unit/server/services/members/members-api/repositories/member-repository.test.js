@@ -3569,6 +3569,13 @@ describe('MemberRepository', function () {
       let subscriptions;
       let status;
 
+      const subscriptionFor = (productId, subStatus = 'active') => ({
+        get: sinon.stub().withArgs('status').returns(subStatus),
+        related: () => ({
+          related: () => ({ get: sinon.stub().withArgs('product_id').returns(productId) }),
+        }),
+      });
+
       beforeEach(function () {
         products = [];
         subscriptions = [];
@@ -3794,6 +3801,176 @@ describe('MemberRepository', function () {
         sinon.assert.notCalled(purchaseLinks.getPurchaseSourcedProducts);
       });
 
+      it('dates the added event with grantedAt (a backdated grant)', async function () {
+        const grantedAt = new Date('2025-06-01T07:30:00.000Z');
+
+        await buildRepo({ purchaseLinks }).grantPurchasedProduct(
+          { memberId: 'member_1', productId: 'course', expiresAt: null, grantedAt },
+          { transacting: trx, requireNewLink: true, rejectCompLink: true },
+        );
+
+        sinon.assert.calledOnceWithExactly(
+          MemberProductEvent.add,
+          { member_id: 'member_1', product_id: 'course', action: 'added', created_at: grantedAt },
+          { transacting: trx },
+        );
+        // The guard options are not passed on to the model layer.
+        const findOptions = Member.findOne.firstCall.args[1];
+        assert.equal('requireNewLink' in findOptions, false);
+        assert.equal('rejectCompLink' in findOptions, false);
+        assert.equal('requireNewLink' in Member.edit.firstCall.args[1], false);
+      });
+
+      it('keeps the guard options when it opens its own transaction', async function () {
+        products = [{ id: 'course', expiry_at: null }];
+        subscriptions = [subscriptionFor('course')];
+
+        await assert.rejects(
+          buildRepo({ purchaseLinks }).grantPurchasedProduct(
+            { memberId: 'member_1', productId: 'course' },
+            { requireNewLink: true },
+          ),
+          { code: 'PURCHASE_BACKDATE_LINK_EXISTS' },
+        );
+        sinon.assert.calledOnce(Member.transaction);
+      });
+
+      it('requireNewLink: refuses when any link to the tier exists', async function () {
+        status = 'paid';
+        products = [{ id: 'course', expiry_at: null }];
+        subscriptions = [subscriptionFor('course')];
+
+        await assert.rejects(
+          buildRepo({ purchaseLinks }).grantPurchasedProduct(
+            {
+              memberId: 'member_1',
+              productId: 'course',
+              grantedAt: new Date('2025-01-01T00:00:00.000Z'),
+            },
+            { transacting: trx, requireNewLink: true, rejectCompLink: true },
+          ),
+          (err) => {
+            assert.ok(err instanceof errors.ValidationError);
+            assert.equal(err.code, 'PURCHASE_BACKDATE_LINK_EXISTS');
+            assert.equal(err.property, 'created_at');
+            assert.equal(
+              err.message,
+              "Member already has access to this tier, so access can't be backdated.",
+            );
+            return true;
+          },
+        );
+        sinon.assert.notCalled(Member.edit);
+        sinon.assert.notCalled(MemberProductEvent.add);
+      });
+
+      it('requireNewLink: allows a tier the member does not hold', async function () {
+        products = [{ id: 'other', expiry_at: null }];
+
+        await buildRepo({ purchaseLinks }).grantPurchasedProduct(
+          { memberId: 'member_1', productId: 'course' },
+          { transacting: trx, requireNewLink: true },
+        );
+
+        sinon.assert.calledOnce(Member.edit);
+      });
+
+      it('rejectCompLink: refuses a comp link on the tier and leaves it untouched', async function () {
+        status = 'comped';
+        products = [{ id: 'course', expiry_at: '2026-12-01T00:00:00.000Z' }];
+
+        await assert.rejects(
+          buildRepo({ purchaseLinks }).grantPurchasedProduct(
+            { memberId: 'member_1', productId: 'course' },
+            { transacting: trx, rejectCompLink: true },
+          ),
+          (err) => {
+            assert.ok(err instanceof errors.ValidationError);
+            assert.equal(err.code, 'PURCHASE_COMP_EXISTS');
+            assert.equal(err.property, 'tier_id');
+            return true;
+          },
+        );
+        assert.deepEqual(Member.findOne.firstCall.args[1].withRelated, [
+          'products',
+          'stripeSubscriptions',
+          'stripeSubscriptions.stripePrice',
+          'stripeSubscriptions.stripePrice.stripeProduct',
+        ]);
+        sinon.assert.notCalled(Member.edit);
+        sinon.assert.notCalled(MemberStatusEvent.add);
+      });
+
+      it('rejectCompLink: refuses a gift link, and is checked before requireNewLink', async function () {
+        status = 'gift';
+        products = [{ id: 'course', expiry_at: '2026-12-01T00:00:00.000Z' }];
+
+        await assert.rejects(
+          buildRepo({ purchaseLinks }).grantPurchasedProduct(
+            { memberId: 'member_1', productId: 'course', grantedAt: new Date() },
+            { transacting: trx, rejectCompLink: true, requireNewLink: true },
+          ),
+          { code: 'PURCHASE_COMP_EXISTS' },
+        );
+      });
+
+      it('rejectCompLink: a comp on another tier, or an inactive subscription, does not back the link', async function () {
+        status = 'paid';
+        products = [{ id: 'course', expiry_at: null }];
+        subscriptions = [subscriptionFor('library'), subscriptionFor('course', 'canceled')];
+
+        await assert.rejects(
+          buildRepo({ purchaseLinks }).grantPurchasedProduct(
+            { memberId: 'member_1', productId: 'course' },
+            { transacting: trx, rejectCompLink: true },
+          ),
+          { code: 'PURCHASE_COMP_EXISTS' },
+        );
+      });
+
+      it('rejectCompLink: allows a link backed by an active subscription to the tier', async function () {
+        status = 'paid';
+        products = [{ id: 'course', expiry_at: null }];
+        subscriptions = [subscriptionFor('course')];
+
+        const result = await buildRepo({ purchaseLinks }).grantPurchasedProduct(
+          { memberId: 'member_1', productId: 'course' },
+          { transacting: trx, rejectCompLink: true },
+        );
+
+        assert.equal(result, member);
+        sinon.assert.notCalled(Member.edit);
+      });
+
+      it('rejectCompLink: allows a purchase-sourced link (the caller re-checks ownership)', async function () {
+        purchased({ id: 'course', expiry_at: null });
+        products = [{ id: 'course', expiry_at: null }];
+
+        await buildRepo({ purchaseLinks }).grantPurchasedProduct(
+          { memberId: 'member_1', productId: 'course' },
+          { transacting: trx, rejectCompLink: true },
+        );
+
+        sinon.assert.calledWith(purchaseLinks.getPurchaseSourcedProducts, 'member_1', {
+          transacting: trx,
+        });
+        sinon.assert.notCalled(Member.edit);
+      });
+
+      it('rejectCompLink: a new link needs no purchase lookup', async function () {
+        products = [{ id: 'comp', expiry_at: null }];
+        status = 'comped';
+
+        await buildRepo({ purchaseLinks }).grantPurchasedProduct(
+          { memberId: 'member_1', productId: 'course' },
+          { transacting: trx, rejectCompLink: true },
+        );
+
+        sinon.assert.notCalled(purchaseLinks.getPurchaseSourcedProducts);
+        sinon.assert.calledOnce(MemberProductEvent.add);
+        assert.equal('created_at' in MemberProductEvent.add.firstCall.args[0], false);
+      });
+
       it('throws NotFoundError when the member does not exist', async function () {
         Member.findOne.resolves(null);
 
@@ -4012,6 +4189,24 @@ describe('MemberRepository', function () {
         sinon.assert.calledWith(
           warnStub,
           sinon.match({ event: { name: 'purchase.refund_kept_gift_link' } }),
+        );
+      });
+
+      it('logs a staff revoke that keeps the gift link as a revoke, not a refund', async function () {
+        const warnStub = sinon.stub(logging, 'warn');
+        status = 'gift';
+        products = [{ id: 'course', expiry_at: null }];
+
+        await buildRepo({ purchaseLinks }).revokePurchasedProduct(
+          { memberId: 'member_1', productId: 'course', reason: 'revoke' },
+          { transacting: trx },
+        );
+
+        sinon.assert.notCalled(Member.edit);
+        sinon.assert.calledOnceWithExactly(
+          warnStub,
+          sinon.match({ event: { name: 'purchase.revoke_kept_gift_link' } }),
+          sinon.match(/^Revoked purchase tier/),
         );
       });
 

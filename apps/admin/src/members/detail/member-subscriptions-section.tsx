@@ -14,6 +14,7 @@ import {
   getSubscriptionValidityLabel,
   groupSubscriptionsByTier,
 } from './member-subscription';
+import { getSubscriptionBackedTiers } from './member-purchase-tiers'; // fork(salvare)
 import { getSymbol } from '@tryghost/admin-x-framework';
 import type { Member, MemberSubscription } from '@tryghost/admin-x-framework/api/members';
 import type { SubscriptionKind } from './member-subscription';
@@ -217,7 +218,8 @@ const MemberSubscriptionsSection: React.FC<MemberSubscriptionsSectionProps> = ({
   // tiers yet + at least one active paid tier exists. The isNew and
   // paidMembersEnabled halves are covered by the guards above; combine the
   // remaining conditions here.
-  const isAddCompAllowed = canAddComp && (member.tiers?.length ?? 0) === 0;
+  // fork(salvare): a purchased tier has no subscription row and doesn't block a comp.
+  const isAddCompAllowed = canAddComp && getSubscriptionBackedTiers(member).length === 0;
 
   // The Add-complimentary button appears in TWO places, matching Ember exactly
   // (`gh-member-settings-form.hbs:82-111,279-293`):

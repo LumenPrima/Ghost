@@ -4,6 +4,17 @@ import TierCheckoutCollection, {
 } from './tier-checkout-collection';
 import { useTierCheckoutCollection } from './use-tier-checkout-collection';
 import TierDetailPreview from './tier-detail-preview';
+// fork(salvare): one-time pricing
+import TierPricingMode from './tier-pricing-mode';
+import {
+  type PricingMode,
+  buildPricingPayload,
+  checkoutEditsDiscardWarning,
+  initialPricingMode,
+  pricingModeChangeWarning,
+  validateOneTimePrice,
+} from './tier-one-time-price';
+import { useSalvareCapabilities } from '@/salvare/use-salvare-capabilities';
 import useCurrencyInput from '@/settings/hooks/use-currency-input';
 import useSettingGroup from '@/settings/hooks/use-setting-group';
 import useSortableIndexedList from '@/settings/hooks/use-sortable-indexed-list';
@@ -60,9 +71,14 @@ const TierDetailModalContent: React.FC<{
   checkout: ReturnType<typeof useTierCheckoutCollection>;
 }> = ({ tier, checkout }) => {
   const isFreeTier = tier?.type === 'free';
+  // fork(salvare): a paid tier is sold either as a subscription or as a one-time purchase.
+  const supportsOneTime = useSalvareCapabilities().purchases && !isFreeTier;
+  const [pricingMode, setPricingMode] = React.useState<PricingMode>(initialPricingMode(tier));
+  const isOneTime = supportsOneTime && pricingMode === 'one_time';
   // Both flags are already gated on a paid tier (saved or being created) inside the hook.
-  const checkoutVisible = checkout.enabled;
-  const checkoutFailed = checkout.failed;
+  // fork(salvare): purchase checkout ignores the checkout collection, so one-time mode hides it.
+  const checkoutVisible = checkout.enabled && !isOneTime;
+  const checkoutFailed = checkout.failed && !isOneTime;
   const [currencyOpen, setCurrencyOpen] = React.useState(false);
 
   const { updateRoute } = useSettingsNavigation();
@@ -84,18 +100,22 @@ const TierDetailModalContent: React.FC<{
 
   const validators: { [key in keyof Tier]?: () => string | undefined } = {
     name: () => (formState.name ? undefined : 'Enter a name for the tier'),
+    // fork(salvare): the recurring prices are hidden, and not validated, in one-time mode
     monthly_price: () =>
-      formState.type !== 'free'
+      formState.type !== 'free' && !isOneTime
         ? validateCurrencyAmount(formState.monthly_price || 0, formState.currency, {
             allowZero: false,
           })
         : undefined,
     yearly_price: () =>
-      formState.type !== 'free'
+      formState.type !== 'free' && !isOneTime
         ? validateCurrencyAmount(formState.yearly_price || 0, formState.currency, {
             allowZero: false,
           })
         : undefined,
+    // fork(salvare)
+    one_time_price: () =>
+      isOneTime ? validateOneTimePrice(formState.one_time_price, formState.currency) : undefined,
   };
 
   const { formState, saveState, updateForm, handleSave, validate, errors, clearError, okProps } =
@@ -127,6 +147,11 @@ const TierDetailModalContent: React.FC<{
         if (!isFreeTier) {
           values.currency = currency;
           values.trial_days = parseInt(trialDays);
+        }
+
+        // fork(salvare): send the one-time price, or clear it when leaving one-time mode
+        if (supportsOneTime) {
+          Object.assign(values, buildPricingPayload(pricingMode, formState.one_time_price, tier));
         }
 
         if (tier?.id) {
@@ -235,6 +260,41 @@ const TierDetailModalContent: React.FC<{
       setHasFreeTrial(false);
       updateForm((state) => ({ ...state, trial_days: '0' }));
     }
+  };
+
+  // fork(salvare): an existing tier confirms a change away from its saved pricing mode, and
+  // any tier confirms a switch to one-time that would drop unsaved checkout edits
+  const changePricingMode = (mode: PricingMode) => {
+    const apply = () => {
+      setPricingMode(mode);
+      // Marks the form dirty, so Save sends the change.
+      updateForm((state) => ({ ...state }));
+      clearError('monthly_price');
+      clearError('yearly_price');
+      clearError('one_time_price');
+    };
+
+    // One-time mode unmounts the checkout collection section along with its unsaved edits.
+    const discardsCheckoutEdits = mode === 'one_time' && checkoutDirty;
+    const changesSavedMode = Boolean(tier) && mode !== initialPricingMode(tier);
+    if (!changesSavedMode && !discardsCheckoutEdits) {
+      apply();
+      return;
+    }
+
+    const warning = changesSavedMode
+      ? pricingModeChangeWarning(mode, formState, discardsCheckoutEdits)
+      : checkoutEditsDiscardWarning();
+    confirm({
+      title: warning.title,
+      prompt: warning.prompt,
+      okLabel: warning.okLabel,
+      cancelLabel: 'Cancel',
+      onOk: (confirmModal) => {
+        apply();
+        confirmModal?.remove();
+      },
+    });
   };
 
   // Only validate amounts when the user changes currency, don't show errors on initial render
@@ -431,7 +491,22 @@ const TierDetailModalContent: React.FC<{
                           </Field>
                         </div>
                       </div>
-                      <div className="flex flex-col gap-2">
+                      {/* fork(salvare) */}
+                      {supportsOneTime && (
+                        <TierPricingMode
+                          currency={formState.currency}
+                          error={errors.one_time_price}
+                          mode={pricingMode}
+                          oneTimePrice={formState.one_time_price}
+                          onClearError={() => clearError('one_time_price')}
+                          onModeChange={changePricingMode}
+                          onOneTimePriceChange={(price) =>
+                            updateForm((state) => ({ ...state, one_time_price: price }))
+                          }
+                        />
+                      )}
+                      {/* fork(salvare): the recurring prices are hidden in one-time mode */}
+                      <div className={cn('flex flex-col gap-2', isOneTime && 'hidden')}>
                         <Field data-invalid={Boolean(errors.monthly_price) || undefined}>
                           <FieldLabel className="sr-only" htmlFor="tier-monthly-price">
                             Monthly price
@@ -486,7 +561,8 @@ const TierDetailModalContent: React.FC<{
                         </Field>
                       </div>
                     </div>
-                    <div className="basis-1/2">
+                    {/* fork(salvare): no free trial on a one-time purchase */}
+                    <div className={cn('basis-1/2', isOneTime && 'hidden')}>
                       <div className="mb-1 flex h-6 flex-col justify-center">
                         <Field orientation="horizontal">
                           <FieldLabel htmlFor="tier-free-trial">Add a free trial</FieldLabel>
@@ -643,7 +719,12 @@ const TierDetailModalContent: React.FC<{
           )}
         </div>
         <div className="sticky top-[96px] hidden shrink-0 basis-[380px] min-[920px]:!visible min-[920px]:!block">
-          <TierDetailPreview isFreeTier={isFreeTier} tier={formState} />
+          <TierDetailPreview
+            isFreeTier={isFreeTier}
+            // fork(salvare)
+            oneTimePrice={isOneTime ? (formState.one_time_price ?? null) : undefined}
+            tier={formState}
+          />
         </div>
       </div>
     </SettingsModal>

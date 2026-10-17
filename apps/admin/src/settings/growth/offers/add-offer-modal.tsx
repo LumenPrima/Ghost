@@ -30,7 +30,10 @@ import {
   getOfferPortalPreviewUrl,
   type offerPortalPreviewUrlTypes,
 } from '@/settings/utils/get-offers-portal-preview-url';
-import { getPaidActiveTiers, useBrowseTiers } from '@tryghost/admin-x-framework/api/tiers';
+import {
+  getPaidActiveSubscriptionTiers, // fork(salvare)
+  useBrowseTiers,
+} from '@tryghost/admin-x-framework/api/tiers';
 import { getTiersCadences } from '@/settings/utils/get-tiers-cadences';
 import { toast } from 'sonner';
 import { useAddOffer } from '@tryghost/admin-x-framework/api/offers';
@@ -467,7 +470,8 @@ const AddOfferModal = () => {
   const [href, setHref] = useState<string>('');
   const { updateRoute } = useSettingsNavigation();
   const { data: { tiers } = {} } = useBrowseTiers();
-  const activeTiers = getPaidActiveTiers(tiers || []);
+  // fork(salvare): offers can't use purchase-only tiers, so the preview fallback skips them too
+  const activeTiers = getPaidActiveSubscriptionTiers(tiers || []);
   const tierCadenceOptions = getTiersCadences(activeTiers);
   const { mutateAsync: addOffer } = useAddOffer();
   const [selectedTier, setSelectedTier] = useState({

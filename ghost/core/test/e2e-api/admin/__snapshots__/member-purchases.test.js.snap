@@ -1,0 +1,49 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`Member purchases Admin API browse returns an empty list for a member with no purchases 1: [body] 1`] = `
+Object {
+  "member_purchases": Array [],
+}
+`;
+
+exports[`Member purchases Admin API grant grants the course to a free member for nothing, with no Stripe ids 1: [body] 1`] = `
+Object {
+  "member_purchases": Array [
+    Object {
+      "amount": 0,
+      "created_at": StringMatching /\\\\d\\{4\\}-\\\\d\\{2\\}-\\\\d\\{2\\}T\\\\d\\{2\\}:\\\\d\\{2\\}:\\\\d\\{2\\}\\\\\\.000Z/,
+      "currency": "usd",
+      "expires_at": null,
+      "id": StringMatching /\\[a-f0-9\\]\\{24\\}/,
+      "member_id": StringMatching /\\[a-f0-9\\]\\{24\\}/,
+      "refunded_at": null,
+      "revoked_at": null,
+      "source": "manual",
+      "status": "paid",
+      "stripe_checkout_session_id": null,
+      "stripe_customer_id": null,
+      "stripe_payment_intent_id": null,
+      "tier": Object {
+        "id": StringMatching /\\[a-f0-9\\]\\{24\\}/,
+        "name": "Breaking Free",
+        "slug": "breaking-free",
+      },
+      "updated_at": StringMatching /\\\\d\\{4\\}-\\\\d\\{2\\}-\\\\d\\{2\\}T\\\\d\\{2\\}:\\\\d\\{2\\}:\\\\d\\{2\\}\\\\\\.000Z/,
+    },
+  ],
+}
+`;
+
+exports[`Member purchases Admin API grant grants the course to a free member for nothing, with no Stripe ids 2: [headers] 1`] = `
+Object {
+  "access-control-allow-origin": "http://127.0.0.1:2369",
+  "cache-control": "no-cache, private, no-store, must-revalidate, max-stale=0, post-check=0, pre-check=0",
+  "content-length": StringMatching /\\\\d\\+/,
+  "content-type": "application/json; charset=utf-8",
+  "content-version": StringMatching /v\\\\d\\+\\\\\\.\\\\d\\+/,
+  "etag": StringMatching /\\(\\?:W\\\\/\\)\\?"\\(\\?:\\[ !#-\\\\x7E\\\\x80-\\\\xFF\\]\\*\\|\\\\r\\\\n\\[\\\\t \\]\\|\\\\\\\\\\.\\)\\*"/,
+  "location": StringMatching /https\\?:\\\\/\\\\/\\.\\*\\?\\\\/purchases\\\\/\\[a-f0-9\\]\\{24\\}\\\\//,
+  "vary": "Accept-Version, Origin, Accept-Encoding",
+  "x-powered-by": "Express",
+}
+`;

@@ -36,6 +36,12 @@ const CUSTOM_FIELDS_EDITED_ACTION = 'custom_fields_edited';
  * @prop {{getMemberPresentations: (memberIds: string[]) => Promise<Map<string, {cadence: 'month' | 'year', currency: string, amount: number}>>}} service
  */
 
+/**
+ * fork(salvare): the members API's purchase-links facade (services/members/api.js).
+ * @typedef {object} IPurchaseLinks
+ * @prop {(memberIds: string[]) => Promise<Map<string, Set<string>>>} getPurchaseSourcedProductIdsForMembers
+ */
+
 module.exports = class MemberBREADService {
   /**
    * @param {object} deps
@@ -50,6 +56,7 @@ module.exports = class MemberBREADService {
    * @param {IGiftsModule} deps.giftService
    * @param {import('../../../members-metafields/values-service').MetafieldValuesService} deps.metafieldValues Required: boot builds it before the members service
    * @param {import('../../../members-metafields/definitions-service').MetafieldDefinitionsService} deps.metafieldDefinitions Required: boot builds it before the members service
+   * @param {IPurchaseLinks} [deps.purchaseLinks] fork(salvare): tiers held through a one-time purchase
    */
   constructor({
     memberRepository,
@@ -64,6 +71,7 @@ module.exports = class MemberBREADService {
     giftService,
     metafieldValues,
     metafieldDefinitions,
+    purchaseLinks, // fork(salvare)
   }) {
     this.offersAPI = offersAPI;
     /** @private */
@@ -88,6 +96,8 @@ module.exports = class MemberBREADService {
     this.metafieldValues = metafieldValues;
     /** @private */
     this.metafieldDefinitions = metafieldDefinitions;
+    /** @private fork(salvare) */
+    this.purchaseLinks = purchaseLinks;
   }
 
   /**
@@ -116,8 +126,9 @@ module.exports = class MemberBREADService {
    * Adds missing complimentary subscriptions to a member and makes sure the tier of all subscriptions is set correctly.
    * @param {Object} member JSON serialized member
    * @param {Map<string, {cadence: 'month' | 'year', currency: string, amount: number}>} [giftMap] Map of memberId → active redeemed gift, used to populate real price details on synthetic gift subscriptions
+   * @param {Map<string, Set<string>>} [purchasedMap] fork(salvare): memberId → product ids held through an active one-time purchase
    */
-  attachSubscriptionsToMember(member, giftMap = new Map()) {
+  attachSubscriptionsToMember(member, giftMap = new Map(), purchasedMap = new Map()) {
     if (!member.products || !Array.isArray(member.products)) {
       return member;
     }
@@ -157,8 +168,28 @@ module.exports = class MemberBREADService {
         }
       }
 
+      // fork(salvare): a tier the member bought outright is not a comp or a gift, so it gets no
+      // synthetic row (it showed as "Complimentary" with a Remove action that did nothing). If
+      // skipping them would leave a comped or gift member with no row at all, keep them all:
+      // that member's comp or gift is on a tier they also bought, and the row must stay.
+      // Known edge case: the gift lookup has no tier id, so a gift member who also bought
+      // other tiers sees every one labelled "Gift subscription".
+      const purchasedProductIds = purchasedMap.get(member.id) ?? new Set();
+      const unbackedProducts = member.products.filter(
+        (product) => !subscriptionProducts.includes(product.id),
+      );
+      const syntheticProducts = unbackedProducts.filter(
+        (product) => !purchasedProductIds.has(product.id),
+      );
+      const syntheticProductIds = new Set(
+        (syntheticProducts.length > 0 ? syntheticProducts : unbackedProducts).map(
+          (product) => product.id,
+        ),
+      );
+
       for (const product of member.products) {
-        if (!subscriptionProducts.includes(product.id)) {
+        if (syntheticProductIds.has(product.id)) {
+          // fork(salvare): was `!subscriptionProducts.includes(product.id)`
           const productAddEvent = member.productEvents.find(
             (event) => event.product_id === product.id && event.action === 'added',
           );
@@ -383,6 +414,33 @@ module.exports = class MemberBREADService {
   }
 
   /**
+   * fork(salvare): product ids each comped or gift member holds through an active one-time
+   * purchase, so attachSubscriptionsToMember can leave them out of the synthetic rows. Only
+   * those statuses get synthetic rows, so free and paid members (every signed-in page view of
+   * a typical reader) run no query.
+   * @private
+   * @param {import('bookshelf').Model[]} members - Bookshelf member models
+   * @returns {Promise<Map<string, Set<string>>>}
+   */
+  async fetchPurchasedProductsForMembers(members) {
+    const memberIds = members
+      .filter((m) => m.get('status') === 'comped' || m.get('status') === 'gift')
+      .map((m) => m.id);
+
+    if (memberIds.length === 0 || !this.purchaseLinks) {
+      return new Map();
+    }
+
+    try {
+      return await this.purchaseLinks.getPurchaseSourcedProductIdsForMembers(memberIds);
+    } catch (e) {
+      logging.error(`Failed to load purchased tiers for members - ${memberIds.join(', ')}.`);
+      logging.error(e);
+      return new Map();
+    }
+  }
+
+  /**
    * @param {object} data
    * @param {object} [options]
    * @param {import('../../../members-metafields').Audience | null} [options.metafieldsFor]
@@ -435,12 +493,13 @@ module.exports = class MemberBREADService {
 
     member.subscriptions = member.subscriptions.filter((sub) => !!sub.price);
 
-    const [offerMap, offerRedemptionsMap, giftMap] = await Promise.all([
+    const [offerMap, offerRedemptionsMap, giftMap, purchasedMap] = await Promise.all([
       this.fetchSubscriptionOffers(stripeSubscriptions),
       this.fetchSubscriptionOfferRedemptions(stripeSubscriptions),
       this.fetchActiveGiftsForMembers([model]),
+      this.fetchPurchasedProductsForMembers([model]), // fork(salvare)
     ]);
-    this.attachSubscriptionsToMember(member, giftMap);
+    this.attachSubscriptionsToMember(member, giftMap, purchasedMap); // fork(salvare): purchasedMap
     this.attachOffersToSubscriptions(member, offerMap, offerRedemptionsMap);
     this.attachNextPaymentToSubscriptions(member);
     await this.attachAttributionsToMember(member, subscriptionIdMap);
@@ -782,10 +841,11 @@ module.exports = class MemberBREADService {
     const subscriptions = page.data.flatMap((model) =>
       model.related('stripeSubscriptions').slice(),
     );
-    const [offerMap, offerRedemptionsMap, giftMap] = await Promise.all([
+    const [offerMap, offerRedemptionsMap, giftMap, purchasedMap] = await Promise.all([
       this.fetchSubscriptionOffers(subscriptions),
       this.fetchSubscriptionOfferRedemptions(subscriptions),
       this.fetchActiveGiftsForMembers(page.data),
+      this.fetchPurchasedProductsForMembers(page.data), // fork(salvare)
     ]);
 
     const bulkSuppressionData = await this.emailSuppressionList.getBulkSuppressionData(
@@ -804,7 +864,7 @@ module.exports = class MemberBREADService {
     const data = page.data.map((model, index) => {
       const member = model.toJSON(options);
       member.subscriptions = member.subscriptions.filter((sub) => !!sub.price);
-      this.attachSubscriptionsToMember(member, giftMap);
+      this.attachSubscriptionsToMember(member, giftMap, purchasedMap); // fork(salvare): purchasedMap
       this.attachOffersToSubscriptions(member, offerMap, offerRedemptionsMap);
       this.attachNextPaymentToSubscriptions(member);
       if (!originalWithRelated.includes('products')) {

@@ -15,6 +15,9 @@ Object {
     "labs": Any<Object>,
     "mail": "",
     "mailgunIsConfigured": false,
+    "salvare": Object {
+      "purchases": true,
+    },
     "security": Object {
       "allowWebhookInternalIPs": true,
       "staffDeviceVerification": false,

@@ -256,6 +256,15 @@ module.exports = function apiRoutes() {
   );
   router.post('/members/:id/commenting/enable', mw.authAdminApi, http(api.memberCommenting.enable));
 
+  // fork(salvare): one-time purchases (services/purchases/README.md)
+  router.get('/members/:id/purchases', mw.authAdminApi, http(api.memberPurchases.browse));
+  router.post('/members/:id/purchases', mw.authAdminApi, http(api.memberPurchases.add));
+  router.delete(
+    '/members/:id/purchases/:purchase_id',
+    mw.authAdminApi,
+    http(api.memberPurchases.destroy),
+  );
+
   // ## Stats
   router.get('/stats/member_count', mw.authAdminApi, http(api.stats.memberCountHistory));
   router.get('/stats/mrr', mw.authAdminApi, http(api.stats.mrr));

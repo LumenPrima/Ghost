@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "member_purchases",
+  "title": "member_purchases",
+  "description": "Base member_purchases definitions",
+  "definitions": {
+    "member_purchase": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tier_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{24}$"
+        },
+        "created_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "pattern": "(?:[Zz]|[+-]\\d{2}:\\d{2})$"
+        },
+        "amount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "currency": {
+          "type": ["string", "null"],
+          "pattern": "^[a-zA-Z]{3}$"
+        }
+      },
+      "required": ["tier_id"]
+    }
+  }
+}

@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import type { Knex } from 'knex';
-import { getPurchaseSourcedProducts } from '../../../../../core/server/services/purchases/purchase-links';
+import {
+  getPurchaseSourcedProductIdsForMembers,
+  getPurchaseSourcedProducts,
+} from '../../../../../core/server/services/purchases/purchase-links';
 import { toDatabaseDate } from '../../../../../core/server/lib/db-types/date';
 import { createPurchaseTables, createSqliteKnex } from './db';
 
@@ -14,7 +17,7 @@ describe('getPurchaseSourcedProducts', function () {
   async function insertPurchase(row: {
     member_id?: string;
     product_id: string;
-    status?: 'paid' | 'refunded';
+    status?: 'paid' | 'refunded' | 'revoked';
     expires_at?: Date | null;
   }) {
     counter += 1;
@@ -36,7 +39,7 @@ describe('getPurchaseSourcedProducts', function () {
     counter = 0;
     knex = createSqliteKnex();
     await createPurchaseTables(knex);
-    await knex('members').insert([{ id: 'member_1' }, { id: 'member_2' }]);
+    await knex('members').insert([{ id: 'member_1' }, { id: 'member_2' }, { id: 'member_3' }]);
     await knex('products').insert([{ id: COURSE }, { id: LIBRARY }]);
   });
 
@@ -112,5 +115,117 @@ describe('getPurchaseSourcedProducts', function () {
     });
 
     assert.deepEqual(products, [{ id: COURSE, expiry_at: null }]);
+  });
+});
+
+describe('getPurchaseSourcedProductIdsForMembers', function () {
+  let knex: Knex;
+  let counter: number;
+
+  async function insertPurchase(row: {
+    member_id: string;
+    product_id: string;
+    status?: 'paid' | 'refunded' | 'revoked';
+    expires_at?: Date | null;
+  }) {
+    counter += 1;
+    await knex('members_purchases').insert({
+      id: `purchase_${counter}`.padEnd(24, '0'),
+      member_id: row.member_id,
+      product_id: row.product_id,
+      amount: 9900,
+      currency: 'usd',
+      status: row.status ?? 'paid',
+      expires_at: row.expires_at ? toDatabaseDate(row.expires_at) : null,
+      created_at: toDatabaseDate(new Date()),
+    });
+  }
+
+  beforeEach(async function () {
+    counter = 0;
+    knex = createSqliteKnex();
+    await createPurchaseTables(knex);
+    await knex('members').insert([{ id: 'member_1' }, { id: 'member_2' }, { id: 'member_3' }]);
+    await knex('products').insert([{ id: COURSE }, { id: LIBRARY }]);
+  });
+
+  afterEach(async function () {
+    await knex.destroy();
+  });
+
+  it('runs no query for an empty list', async function () {
+    const queries: unknown[] = [];
+    knex.on('query', (query) => queries.push(query));
+
+    const result = await getPurchaseSourcedProductIdsForMembers(knex, []);
+
+    assert.deepEqual(result, new Map());
+    assert.equal(queries.length, 0);
+  });
+
+  it('matches the per-member lookup for each member', async function () {
+    await insertPurchase({ member_id: 'member_1', product_id: COURSE });
+    await insertPurchase({ member_id: 'member_1', product_id: COURSE });
+    await insertPurchase({
+      member_id: 'member_1',
+      product_id: LIBRARY,
+      expires_at: new Date(Date.now() + 60 * 60 * 1000),
+    });
+    await insertPurchase({ member_id: 'member_2', product_id: COURSE, status: 'refunded' });
+    await insertPurchase({ member_id: 'member_2', product_id: LIBRARY, status: 'revoked' });
+    await insertPurchase({
+      member_id: 'member_3',
+      product_id: COURSE,
+      expires_at: new Date(Date.now() - 60 * 1000),
+    });
+    await insertPurchase({ member_id: 'member_3', product_id: LIBRARY });
+
+    const members = ['member_1', 'member_2', 'member_3'];
+    const batched = await getPurchaseSourcedProductIdsForMembers(knex, [...members, 'member_1']);
+
+    for (const memberId of members) {
+      const single = (await getPurchaseSourcedProducts(knex, memberId)).map(
+        (product) => product.id,
+      );
+      assert.deepEqual(
+        [...(batched.get(memberId) ?? [])].sort(),
+        single.sort(),
+        `member ${memberId}`,
+      );
+    }
+    // Members with no active purchase are absent.
+    assert.equal(batched.has('member_2'), false);
+    assert.deepEqual([...batched.keys()].sort(), ['member_1', 'member_3']);
+  });
+
+  it('reads inside the given transaction', async function () {
+    const result = await knex.transaction(async (transacting) => {
+      await transacting('members_purchases').insert({
+        id: 'purchase_in_trx_00000000',
+        member_id: 'member_1',
+        product_id: COURSE,
+        amount: 9900,
+        currency: 'usd',
+        status: 'paid',
+        created_at: toDatabaseDate(new Date()),
+      });
+
+      return getPurchaseSourcedProductIdsForMembers(knex, ['member_1'], { transacting });
+    });
+
+    assert.deepEqual(result, new Map([['member_1', new Set([COURSE])]]));
+  });
+
+  it('queries a long member list in chunks', async function () {
+    await insertPurchase({ member_id: 'member_3', product_id: COURSE });
+    const memberIds = Array.from({ length: 1200 }, (_, index) => `missing_${index}`);
+    memberIds.push('member_3');
+    const queries: unknown[] = [];
+    knex.on('query', (query) => queries.push(query));
+
+    const result = await getPurchaseSourcedProductIdsForMembers(knex, memberIds);
+
+    assert.deepEqual(result, new Map([['member_3', new Set([COURSE])]]));
+    assert.equal(queries.length, 3);
   });
 });

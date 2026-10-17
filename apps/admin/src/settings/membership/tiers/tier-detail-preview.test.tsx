@@ -31,4 +31,30 @@ describe('TierDetailPreview', () => {
 
     consoleError.mockRestore();
   });
+
+  // fork(salvare)
+  it('shows a one-time price in place of the monthly and yearly prices', () => {
+    const tier = {
+      trial_days: '7',
+      currency: 'USD',
+      monthly_price: 500,
+      yearly_price: 4000,
+    };
+    const { rerender } = render(
+      <TierDetailPreview isFreeTier={false} oneTimePrice={12900} tier={tier} />,
+    );
+
+    const preview = screen.getByTestId('tier-preview');
+    assert.match(preview.textContent ?? '', /\$129one-time/);
+    assert.equal(screen.queryByRole('button', { name: 'Yearly' }), null);
+    assert.equal(screen.queryByText('7 days free'), null);
+
+    rerender(<TierDetailPreview isFreeTier={false} oneTimePrice={null} tier={tier} />);
+    assert.match(preview.textContent ?? '', /\$99one-time/);
+
+    rerender(<TierDetailPreview isFreeTier={false} tier={tier} />);
+    assert.match(preview.textContent ?? '', /\$5\/month/);
+    assert.ok(screen.getByRole('button', { name: 'Yearly' }));
+    assert.ok(screen.getByText('7 days free'));
+  });
 });

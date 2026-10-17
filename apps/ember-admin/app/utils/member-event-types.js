@@ -13,6 +13,9 @@ export const ALL_EVENT_TYPES = [
     {event: 'feedback_event', icon: 'filter-dropdown-feedback', name: 'Feedback', group: 'others'}
 ];
 
+// fork(salvare): one-time tier purchase events, filtered together with payments.
+const SALVARE_PURCHASE_EVENTS = ['purchase_event', 'purchase_refunded_event', 'purchase_revoked_event'];
+
 export function getAvailableEventTypes(settings, hiddenEvents = []) {
     const extended = [...ALL_EVENT_TYPES];
 
@@ -48,10 +51,12 @@ export function toggleEventType(eventType, currentExcludedEvents = []) {
             excludedEvents.delete('payment_event');
             excludedEvents.delete('donation_event');
             excludedEvents.delete('gift_purchase_event');
+            SALVARE_PURCHASE_EVENTS.forEach(event => excludedEvents.delete(event)); // fork(salvare)
         } else {
             excludedEvents.add('payment_event');
             excludedEvents.add('donation_event');
             excludedEvents.add('gift_purchase_event');
+            SALVARE_PURCHASE_EVENTS.forEach(event => excludedEvents.add(event)); // fork(salvare)
         }
     } else {
         if (excludedEvents.has(eventType)) {

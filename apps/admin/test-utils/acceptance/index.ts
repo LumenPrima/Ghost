@@ -55,6 +55,7 @@ export {
 export type { TinybirdPipeCapture, TinybirdPipeQuery } from './tinybird';
 export { fakeAdminStats } from './stats';
 export { unsavedChangesGuarded } from './unsaved-changes-guard';
+export { salvareBootOverrides, salvareConfigResponse } from './salvare'; // fork(salvare)
 
 // Test-data re-exports, so a spec needs a single import surface.
 export {

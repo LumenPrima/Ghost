@@ -133,6 +133,32 @@ describe('Front-end members behavior', function () {
       assert.equal(decodedToken.exp - decodedToken.iat, 300);
     });
 
+    // fork(salvare): a tier bought outright is an entitlement; `paid` stays status-based
+    it('includes a purchased tier in the entitlement token of a free purchaser', async function () {
+      const tiersService = require('../../core/server/services/tiers');
+      const purchases = require('../../core/server/services/purchases');
+
+      const tier = await tiersService.api.add({
+        name: 'Entitled Course',
+        visibility: 'none',
+        currency: 'usd',
+        monthlyPrice: 500,
+        yearlyPrice: 5000,
+        oneTimePrice: 9900,
+      });
+      const tierId = tier.id.toHexString();
+      const member = await createMember({ email: 'entitled-purchaser@test.com' });
+      await purchases.service.grant({ memberId: member.id, tierId });
+
+      await loginAsMember('entitled-purchaser@test.com');
+      const res = await request.get('/members/api/entitlements').expect(200);
+
+      const decodedToken = jwt.decode(res.text);
+      assert.equal(decodedToken.sub, 'entitled-purchaser@test.com');
+      assert.equal(decodedToken.paid, false);
+      assert.deepEqual(decodedToken.active_tier_ids, [tierId]);
+    });
+
     it('should return no content when removing member sessions', async function () {
       await request
         .del('/members/api/session')

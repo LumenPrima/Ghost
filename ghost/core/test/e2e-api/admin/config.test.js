@@ -69,6 +69,16 @@ describe('Config API', function () {
         });
     });
 
+    // fork(salvare): Admin feature-detects the purchase surfaces from this key.
+    it('Advertises the Salvare purchases capability', async function () {
+      await agent
+        .get('/config/')
+        .expectStatus(200)
+        .expect(({ body }) => {
+          assert.deepEqual(body.config.salvare, { purchases: true });
+        });
+    });
+
     it('Will receive exploreTestimonialsUrl if set', async function () {
       // This is only set in production config, so we override it to test it works
       configUtils.set('explore:testimonials_url', 'https://testing.com/that/this/is/set/correctly');

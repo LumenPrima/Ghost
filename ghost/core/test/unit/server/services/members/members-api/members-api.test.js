@@ -6,6 +6,7 @@ const GeolocationService = require('../../../../../../core/server/services/membe
 const MemberRepository = require('../../../../../../core/server/services/members/members-api/repositories/member-repository');
 const MemberBREADService = require('../../../../../../core/server/services/members/members-api/services/member-bread-service');
 const DomainEvents = require('@tryghost/domain-events');
+const TokenService = require('../../../../../../core/server/services/members/members-api/services/token-service'); // fork(salvare)
 
 describe('MembersAPI', function () {
   const privateKey =
@@ -20,7 +21,8 @@ describe('MembersAPI', function () {
   let tokenData;
   let MemberModel;
 
-  const buildMembersAPI = () => {
+  // fork(salvare): `extra` adds the fork's purchase dependencies
+  const buildMembersAPI = (extra = {}) => {
     return MembersAPI({
       tokenConfig: {
         issuer: 'ghost',
@@ -97,6 +99,7 @@ describe('MembersAPI', function () {
         planWrite: sinon.stub().resolves([]),
         applyWrite: sinon.stub().resolves(),
       },
+      ...extra, // fork(salvare)
     });
   };
 
@@ -229,6 +232,108 @@ describe('MembersAPI', function () {
     sinon.assert.calledOnceWithExactly(giftRedeem, {
       token: 'gift-token-123',
       memberId: 'member_1',
+    });
+  });
+
+  // fork(salvare): one-time purchases
+  describe('purchases', function () {
+    const emptyPage = { data: [], meta: { pagination: { total: 0 } } };
+
+    it('gives the activity feed an empty purchase page while the purchases service is unset', async function () {
+      const api = buildMembersAPI({ purchaseService: { service: undefined } });
+
+      assert.deepEqual(await api.events.getPurchaseEvents({}, undefined), emptyPage);
+      assert.deepEqual(await api.events.getPurchaseRefundedEvents({}, undefined), emptyPage);
+      assert.deepEqual(await api.events.getPurchaseRevokedEvents({}, undefined), emptyPage);
+    });
+
+    it('gives the activity feed an empty purchase page when no purchases module is passed', async function () {
+      const api = buildMembersAPI();
+
+      assert.deepEqual(await api.events.getPurchaseEvents({}, undefined), emptyPage);
+    });
+
+    it('reads purchase events from the purchases service lazily', async function () {
+      const purchaseService = { service: undefined };
+      const api = buildMembersAPI({ purchaseService });
+      const page = {
+        data: [{ type: 'purchase_revoked_event', data: { id: 'p1' } }],
+        meta: { pagination: { total: 1 } },
+      };
+      const browseEvents = sinon.stub().resolves(page);
+      purchaseService.service = { browseEvents };
+      const options = { limit: 5 };
+      const filter = { 'data.member_id': 'member_1' };
+
+      const result = await api.events.getPurchaseRevokedEvents(options, filter);
+
+      assert.equal(result, page);
+      sinon.assert.calledOnceWithExactly(browseEvents, 'purchase_revoked_event', options, filter);
+    });
+
+    describe('entitlement token', function () {
+      let encode;
+
+      beforeEach(function () {
+        encode = sinon.stub(TokenService.prototype, 'encodeEntitlementToken').resolves('token');
+      });
+
+      const member = (overrides = {}) => ({
+        id: 'member_1',
+        uuid: 'uuid-1',
+        email: 'jamie@example.com',
+        status: 'free',
+        subscriptions: [],
+        products: [],
+        ...overrides,
+      });
+
+      it('adds tiers the member bought and is linked to', async function () {
+        const getPurchaseSourcedProducts = sinon.stub().resolves([
+          { id: 'tier_course', expiry_at: null },
+          { id: 'tier_unlinked', expiry_at: null },
+        ]);
+        const api = buildMembersAPI({ purchaseLinks: { getPurchaseSourcedProducts } });
+        MemberBREADService.prototype.read.resolves(member({ products: [{ id: 'tier_course' }] }));
+
+        assert.equal(await api.getMemberEntitlementToken('transient'), 'token');
+
+        sinon.assert.calledOnceWithExactly(getPurchaseSourcedProducts, 'member_1');
+        sinon.assert.calledOnceWithExactly(encode, {
+          sub: 'jamie@example.com',
+          memberUuid: 'uuid-1',
+          paid: false,
+          activeTierIds: ['tier_course'],
+        });
+      });
+
+      it('keeps subscription tiers and lists a tier once', async function () {
+        const getPurchaseSourcedProducts = sinon
+          .stub()
+          .resolves([{ id: 'tier_library', expiry_at: null }]);
+        const api = buildMembersAPI({ purchaseLinks: { getPurchaseSourcedProducts } });
+        MemberBREADService.prototype.read.resolves(
+          member({
+            status: 'comped',
+            subscriptions: [{ status: 'active', tier: { id: 'tier_library' } }],
+            products: [{ id: 'tier_library' }],
+          }),
+        );
+
+        await api.getMemberEntitlementToken('transient');
+
+        assert.deepEqual(encode.firstCall.args[0].activeTierIds, ['tier_library']);
+        assert.equal(encode.firstCall.args[0].paid, true);
+      });
+
+      it('works without purchase links', async function () {
+        const api = buildMembersAPI();
+        MemberBREADService.prototype.read.resolves(member({ products: [{ id: 'tier_course' }] }));
+
+        await api.getMemberEntitlementToken('transient');
+
+        assert.deepEqual(encode.firstCall.args[0].activeTierIds, []);
+      });
     });
   });
 });

@@ -89,6 +89,32 @@ describe('PurchaseEmailService', function () {
     assert.equal(message.text.includes('account for'), false);
   });
 
+  it('thanks the buyer for a purchase', async function () {
+    await service.sendAccessEmail(emailData({ granted: false }));
+
+    const message = sentMessage();
+    assert.ok(message.html.includes('Thank you for your purchase of'));
+    assert.ok(message.text.includes('Thank you for your purchase of Breaking Free ($99.00).'));
+    assert.equal(message.html.includes('given access'), false);
+  });
+
+  it('words a staff grant as given access, with no amount and no thanks', async function () {
+    await service.sendAccessEmail(emailData({ granted: true, amount: 0 }));
+
+    const message = sentMessage();
+    assert.equal(message.subject, "You've been given access to Breaking Free");
+    assert.ok(message.html.includes('been given access to Breaking Free'));
+    assert.ok(
+      message.text.startsWith("You've been given access to Breaking Free\n\nUse this link"),
+    );
+    for (const part of [message.html, message.text]) {
+      assert.equal(part.includes('Thank you for your purchase'), false);
+      assert.equal(part.includes('$0.00'), false);
+      assert.equal(part.includes('You now have access'), false);
+    }
+    assert.ok(message.text.includes(accessUrl));
+  });
+
   it('escapes the tier name in the HTML', async function () {
     await service.sendAccessEmail(emailData({ tierName: '<script>x</script>' }));
 
